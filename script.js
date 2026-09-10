@@ -1066,13 +1066,18 @@ function fecharModalTemasSRS() { document.getElementById("srs-temas-modal").clas
 
 // Apaga do IndexedDB as imagens/áudios anexados a um card SRS (chamado antes de remover o card dos
 // dados, senão o arquivo fica órfão guardado pra sempre, ocupando espaço à toa).
+// Todos os ids de imagem/mídia (áudio/vídeo) que um card SRS pode ter — o campo singular de sempre
+// mais as "extras" (cards importados do Anki com mais de uma imagem/áudio no mesmo lado).
+function todosIdsMidiaDoCardSRS(card) {
+    return [
+        card.imagemPerguntaId, ...(card.imagensExtrasPerguntaIds || []),
+        card.imagemRespostaId, ...(card.imagensExtrasRespostaIds || []),
+        card.midiaPerguntaId, ...(card.midiasExtrasPerguntaIds || []).map(m => m.id),
+        card.midiaRespostaId, ...(card.midiasExtrasRespostaIds || []).map(m => m.id)
+    ].filter(Boolean);
+}
 function excluirMidiasDoCardSRS(card) {
-    const tarefas = [];
-    if (card.imagemPerguntaId) tarefas.push(excluirImagemSRS(card.imagemPerguntaId).catch(() => {}));
-    if (card.imagemRespostaId) tarefas.push(excluirImagemSRS(card.imagemRespostaId).catch(() => {}));
-    if (card.midiaPerguntaId) tarefas.push(excluirImagemSRS(card.midiaPerguntaId).catch(() => {}));
-    if (card.midiaRespostaId) tarefas.push(excluirImagemSRS(card.midiaRespostaId).catch(() => {}));
-    return Promise.all(tarefas);
+    return Promise.all(todosIdsMidiaDoCardSRS(card).map(id => excluirImagemSRS(id).catch(() => {})));
 }
 
 // NOVO: exclui um tema inteiro (e, por causa da hierarquia "::", todos os subtemas dele também) junto
@@ -1120,48 +1125,60 @@ function limparUrlsImagemRevisao() {
     urlsImagemRevisaoAtual.forEach(u => URL.revokeObjectURL(u));
     urlsImagemRevisaoAtual = [];
 }
+// Carrega uma lista de imagens (ids) num container, uma do lado da outra — usado tanto pra imagem
+// única de sempre quanto pras extras (cards do Anki com mais de uma imagem no mesmo lado).
+function exibirListaImagensRevisao(ids, elId, altBase) {
+    const el = document.getElementById(elId);
+    if (!el || ids.length === 0) return;
+    Promise.all(ids.map(id => carregarImagemSRS(id).catch(() => null))).then(blobs => {
+        let algumaCarregada = false;
+        blobs.forEach((blob, idx) => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            urlsImagemRevisaoAtual.push(url);
+            el.innerHTML += `<img src="${url}" alt="${altBase} ${idx + 1}">`;
+            algumaCarregada = true;
+        });
+        if (algumaCarregada) el.classList.remove("oculto");
+    });
+}
+// Mesma ideia, mas pra áudio/vídeo — cada item é {id, tipo}.
+function exibirListaMidiasRevisao(itens, elId) {
+    const el = document.getElementById(elId);
+    if (!el || itens.length === 0) return;
+    Promise.all(itens.map(m => carregarImagemSRS(m.id).then(blob => ({ blob, tipo: m.tipo })).catch(() => null))).then(resultados => {
+        let algumaCarregada = false;
+        resultados.forEach(res => {
+            if (!res || !res.blob) return;
+            const url = URL.createObjectURL(res.blob);
+            urlsImagemRevisaoAtual.push(url);
+            el.innerHTML += res.tipo === "video" ? `<video src="${url}" controls></video>` : `<audio src="${url}" controls></audio>`;
+            algumaCarregada = true;
+        });
+        if (algumaCarregada) el.classList.remove("oculto");
+    });
+}
+
 function exibirImagensRevisaoAtual(item) {
     if (!item) return;
-    if (item.imagemPerguntaId) {
-        carregarImagemSRS(item.imagemPerguntaId).then(blob => {
-            const el = document.getElementById("srs-imagem-pergunta-atual");
-            if (!blob || !el) return;
-            const url = URL.createObjectURL(blob);
-            urlsImagemRevisaoAtual.push(url);
-            el.innerHTML = `<img src="${url}" alt="Imagem da pergunta">`;
-            el.classList.remove("oculto");
-        }).catch(() => {});
-    }
-    if (item.imagemRespostaId) {
-        carregarImagemSRS(item.imagemRespostaId).then(blob => {
-            const el = document.getElementById("srs-imagem-resposta-atual");
-            if (!blob || !el) return;
-            const url = URL.createObjectURL(blob);
-            urlsImagemRevisaoAtual.push(url);
-            el.innerHTML = `<img src="${url}" alt="Imagem da resposta">`;
-            el.classList.remove("oculto");
-        }).catch(() => {});
-    }
-    if (item.midiaPerguntaId) {
-        carregarImagemSRS(item.midiaPerguntaId).then(blob => {
-            const el = document.getElementById("srs-midia-pergunta-atual");
-            if (!blob || !el) return;
-            const url = URL.createObjectURL(blob);
-            urlsImagemRevisaoAtual.push(url);
-            el.innerHTML = item.midiaPerguntaTipo === "video" ? `<video src="${url}" controls></video>` : `<audio src="${url}" controls></audio>`;
-            el.classList.remove("oculto");
-        }).catch(() => {});
-    }
-    if (item.midiaRespostaId) {
-        carregarImagemSRS(item.midiaRespostaId).then(blob => {
-            const el = document.getElementById("srs-midia-resposta-atual");
-            if (!blob || !el) return;
-            const url = URL.createObjectURL(blob);
-            urlsImagemRevisaoAtual.push(url);
-            el.innerHTML = item.midiaRespostaTipo === "video" ? `<video src="${url}" controls></video>` : `<audio src="${url}" controls></audio>`;
-            el.classList.remove("oculto");
-        }).catch(() => {});
-    }
+
+    const idsImagemPergunta = [item.imagemPerguntaId, ...(item.imagensExtrasPerguntaIds || [])].filter(Boolean);
+    exibirListaImagensRevisao(idsImagemPergunta, "srs-imagem-pergunta-atual", "Imagem da pergunta");
+
+    const idsImagemResposta = [item.imagemRespostaId, ...(item.imagensExtrasRespostaIds || [])].filter(Boolean);
+    exibirListaImagensRevisao(idsImagemResposta, "srs-imagem-resposta-atual", "Imagem da resposta");
+
+    const midiasPergunta = [
+        item.midiaPerguntaId ? { id: item.midiaPerguntaId, tipo: item.midiaPerguntaTipo } : null,
+        ...(item.midiasExtrasPerguntaIds || [])
+    ].filter(Boolean);
+    exibirListaMidiasRevisao(midiasPergunta, "srs-midia-pergunta-atual");
+
+    const midiasResposta = [
+        item.midiaRespostaId ? { id: item.midiaRespostaId, tipo: item.midiaRespostaTipo } : null,
+        ...(item.midiasExtrasRespostaIds || [])
+    ].filter(Boolean);
+    exibirListaMidiasRevisao(midiasResposta, "srs-midia-resposta-atual");
 }
 
 // ============================================================
@@ -1349,23 +1366,36 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
 
 // Um lado do card só é considerado "vazio de verdade" se não tiver NEM texto NEM imagem/mídia —
 // cards que são só uma imagem (comuns em baralhos de anatomia, mapas, bandeiras etc.) são válidos.
+// A 1ª imagem/mídia extraída de um lado vira o campo "singular" de sempre (compatível com todo o
+// resto do app: preview ao editar, backup, etc.); o restante (se houver) vira um array "Extras" —
+// só a tela de revisão sabe mostrar essas extras (ver exibirImagensRevisaoAtual).
+function aplicarMidiasExtraidasNoCard(card, lado, extraido) {
+    if (extraido.imagens.length > 0) {
+        card[`imagem${lado}Id`] = extraido.imagens[0];
+        if (extraido.imagens.length > 1) card[`imagensExtras${lado}Ids`] = extraido.imagens.slice(1);
+    }
+    if (extraido.midias.length > 0) {
+        card[`midia${lado}Id`] = extraido.midias[0].id;
+        card[`midia${lado}Tipo`] = extraido.midias[0].tipo;
+        if (extraido.midias.length > 1) card[`midiasExtras${lado}Ids`] = extraido.midias.slice(1);
+    }
+}
+
 function converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaIndice) {
     return Promise.all([
         extrairMidiaDoCampo(campoFrente, zip, nomeParaIndice),
         extrairMidiaDoCampo(campoVerso, zip, nomeParaIndice)
     ]).then(([frente, verso]) => {
-        const frenteVazia = !frente.texto.trim() && !frente.imagemId && !frente.midiaId;
-        const versoVazio = !verso.texto.trim() && !verso.imagemId && !verso.midiaId;
+        const frenteVazia = !frente.texto.trim() && frente.imagens.length === 0 && frente.midias.length === 0;
+        const versoVazio = !verso.texto.trim() && verso.imagens.length === 0 && verso.midias.length === 0;
         if (frenteVazia || versoVazio) throw new Error(`Frente ou Verso sem nenhum conteúdo (nem texto, nem imagem/mídia). Frente: "${campoFrente.slice(0, 60)}" | Verso: "${campoVerso.slice(0, 60)}"`);
         const card = {
             id: Date.now() + Math.floor(Math.random() * 1000000),
             tema: tema, subtema: frente.texto, resposta: verso.texto, tipo: "normal",
             data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
         };
-        if (frente.imagemId) card.imagemPerguntaId = frente.imagemId;
-        if (verso.imagemId) card.imagemRespostaId = verso.imagemId;
-        if (frente.midiaId) { card.midiaPerguntaId = frente.midiaId; card.midiaPerguntaTipo = frente.midiaTipo; }
-        if (verso.midiaId) { card.midiaRespostaId = verso.midiaId; card.midiaRespostaTipo = verso.midiaTipo; }
+        aplicarMidiasExtraidasNoCard(card, "Pergunta", frente);
+        aplicarMidiasExtraidasNoCard(card, "Resposta", verso);
         card._midiaNaoSuportada = frente.midiaNaoSuportada || verso.midiaNaoSuportada;
         return card;
     });
@@ -1373,7 +1403,7 @@ function converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaInd
 
 function converterNotaClozeAnki(campoTexto, tema, zip, nomeParaIndice) {
     return extrairMidiaDoCampo(campoTexto, zip, nomeParaIndice).then(processado => {
-        const semNada = !processado.texto.trim() && !processado.imagemId && !processado.midiaId;
+        const semNada = !processado.texto.trim() && processado.imagens.length === 0 && processado.midias.length === 0;
         if (semNada) throw new Error(`Nota cloze sem nenhum conteúdo. Campo original: "${campoTexto.slice(0, 60)}"`);
         const segmentos = parsearClozeAnki(processado.texto);
         if (!segmentos.some(s => s.lacuna)) throw new Error(`Nota cloze sem nenhuma lacuna válida (esperava {{c1::...}}). Campo: "${campoTexto.slice(0, 60)}"`);
@@ -1384,8 +1414,7 @@ function converterNotaClozeAnki(campoTexto, tema, zip, nomeParaIndice) {
             tema: tema, subtema: subtemaExibicao, resposta: resposta, tipo: "cloze", clozePartes: segmentos,
             data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
         };
-        if (processado.imagemId) card.imagemPerguntaId = processado.imagemId;
-        if (processado.midiaId) { card.midiaPerguntaId = processado.midiaId; card.midiaPerguntaTipo = processado.midiaTipo; }
+        aplicarMidiasExtraidasNoCard(card, "Pergunta", processado);
         card._midiaNaoSuportada = processado.midiaNaoSuportada;
         return card;
     });
@@ -1404,60 +1433,68 @@ function parsearClozeAnki(texto) {
     return segmentos.filter(s => s.texto !== "");
 }
 
+// NOVO: extrai TODAS as imagens e TODOS os áudios/vídeos de um campo (antes só pegava o 1º de cada
+// tipo) — decks com nota "rica" (várias imagens, ou áudio da frase + áudio da palavra, como o add-on
+// Migaku) tinham a maioria da mídia descartada, sobrando só como texto cru tipo "[sound:arquivo.mp3]".
+// A ordem de cada lista é preservada (a posição no texto original), mesmo a extração sendo assíncrona.
 function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
     let texto = campoHtml || "";
-    let imagemId = null, midiaId = null, midiaTipo = null, midiaNaoSuportada = false;
+    const imagensPorPosicao = [];
+    const midiasPorPosicao = [];
+    let midiaNaoSuportada = false;
     const tarefas = [];
 
-    const matchImg = texto.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i);
-    if (matchImg) {
-        texto = texto.replace(matchImg[0], "");
-        const indice = nomeParaIndice[matchImg[1]];
+    texto = texto.replace(/<img[^>]+src=["']([^"']+)["'][^>]*>/gi, (match, src) => {
+        const posicao = imagensPorPosicao.length;
+        imagensPorPosicao.push(null);
+        const indice = nomeParaIndice[src];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
                 zip.file(indice).async("blob").then(blob => {
-                    const novoId = `anki_img_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
-                    return salvarImagemSRS(novoId, blob).then(() => { imagemId = novoId; });
+                    const novoId = `anki_img_${Date.now()}_${Math.floor(Math.random() * 1000000)}_${posicao}`;
+                    return salvarImagemSRS(novoId, blob).then(() => { imagensPorPosicao[posicao] = novoId; });
                 }).catch(() => { midiaNaoSuportada = true; })
             );
         } else {
             midiaNaoSuportada = true;
         }
-    }
+        return "";
+    });
 
-    const matchSom = texto.match(/\[sound:([^\]]+)\]/i);
-    if (matchSom) {
-        texto = texto.replace(matchSom[0], "");
-        const nomeArquivo = matchSom[1];
+    texto = texto.replace(/\[sound:([^\]]+)\]/gi, (match, nomeArquivo) => {
+        const posicao = midiasPorPosicao.length;
+        midiasPorPosicao.push(null);
         const extensao = (nomeArquivo.split(".").pop() || "").toLowerCase();
         const tipo = ["mp4", "webm", "mov", "ogv"].includes(extensao) ? "video" : "audio";
         const indice = nomeParaIndice[nomeArquivo];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
                 zip.file(indice).async("blob").then(blob => {
-                    const novoId = `anki_midia_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
-                    return salvarImagemSRS(novoId, blob).then(() => { midiaId = novoId; midiaTipo = tipo; });
+                    const novoId = `anki_midia_${Date.now()}_${Math.floor(Math.random() * 1000000)}_${posicao}`;
+                    return salvarImagemSRS(novoId, blob).then(() => { midiasPorPosicao[posicao] = { id: novoId, tipo: tipo }; });
                 }).catch(() => { midiaNaoSuportada = true; })
             );
         } else {
             midiaNaoSuportada = true;
         }
-    }
+        return "";
+    });
 
     texto = texto.replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+>/g, "").trim();
 
     // NOVO: quando vários campos foram combinados (nota com mais de 2 campos — ver converterNotaAnki),
-    // dois tipos de "sobra" ficavam feios no texto final:
-    // 1) um campo que era só imagem/áudio (ex: "Screenshot") vira um rótulo vazio ("Screenshot:") depois
-    //    que a imagem/áudio dele já foi extraída acima — essas linhas sem valor são removidas.
-    // 2) só o 1º áudio do campo inteiro vira tocável (limitação atual: 1 áudio por lado); qualquer
-    //    outra referência [sound:...] que sobrar fica como texto morto — também é removida.
-    texto = texto.replace(/\[sound:[^\]]+\]/gi, "").trim();
+    // um campo que era só imagem/áudio (ex: "Screenshot") vira um rótulo vazio ("Screenshot:") depois
+    // que a imagem/áudio dele já foi extraída acima — essas linhas sem valor são removidas.
     texto = texto.split("\n").map(l => l.trim()).filter(l => l && !/^[^:\n]{1,40}:\s*$/.test(l)).join("\n");
 
     texto = converterSintaxeMigaku(texto);
 
-    return Promise.all(tarefas).then(() => ({ texto, imagemId, midiaId, midiaTipo, midiaNaoSuportada }));
+    return Promise.all(tarefas).then(() => ({
+        texto,
+        imagens: imagensPorPosicao.filter(Boolean),
+        midias: midiasPorPosicao.filter(Boolean),
+        midiaNaoSuportada
+    }));
 }
 
 // NOVO: o add-on Migaku (comum em decks de chinês) guarda cada palavra no formato
@@ -3847,10 +3884,12 @@ function exportarComLivrosEmAndamento() {
 }
 
 function gerarBackupComLivros(livrosParaIncluirArquivo) {
+    // NOVO: também inclui os áudios/vídeos dos cards (e as imagens/mídias "extras" de cards com mais
+    // de uma no mesmo lado) — antes só as imagens principais entravam no backup, então áudio se perdia
+    // ao restaurar.
     const idsImagens = new Set();
     dados.srsItems.forEach(item => {
-        if (item.imagemPerguntaId) idsImagens.add(item.imagemPerguntaId);
-        if (item.imagemRespostaId) idsImagens.add(item.imagemRespostaId);
+        todosIdsMidiaDoCardSRS(item).forEach(id => idsImagens.add(id));
     });
 
     if (livrosParaIncluirArquivo.length === 0 && idsImagens.size === 0) {
