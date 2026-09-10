@@ -600,6 +600,18 @@
         </div>
     </div>
 
+    <div id="resultado-importacao-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 520px; text-align: left;">
+            <span class="emoji" id="resultado-importacao-emoji" style="text-align:center;">📥</span>
+            <h2 id="resultado-importacao-titulo" style="text-align:center;">Importação concluída</h2>
+            <textarea id="resultado-importacao-texto" readonly style="width:100%; box-sizing:border-box; min-height:180px; font-family:inherit; font-size:0.85em; color:#333;"></textarea>
+            <div class="form-group" style="margin-top: 12px;">
+                <button type="button" onclick="copiarResultadoImportacao(this)">📋 Copiar texto</button>
+                <button type="button" onclick="fecharModalResultadoImportacao()" style="background: var(--text-secondary);">Fechar</button>
+            </div>
+        </div>
+    </div>
+
     <div id="desenho-imagem-modal" class="modal-oculto">
         <div class="modal-content" style="max-width: 90vw; width: 700px;">
             <h2>🖍 Cubra a área que quiser</h2>

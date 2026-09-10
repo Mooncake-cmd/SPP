@@ -1145,6 +1145,42 @@ function mostrarModalImportandoAnki(mostrar) {
     if (modal) modal.classList.toggle("modal-oculto", !mostrar);
 }
 
+// NOVO: o resultado da importação (e principalmente os motivos de falha) vinha num alert() — texto de
+// alert() não pode ser selecionado/copiado na maioria dos navegadores. Agora mostramos num modal com
+// um <textarea readonly> (selecionável e copiável normalmente) e um botão de copiar.
+function mostrarResultadoImportacao(titulo, emoji, texto) {
+    const modal = document.getElementById("resultado-importacao-modal");
+    if (!modal) { alert(texto); return; } // fallback caso o HTML esteja desatualizado
+    document.getElementById("resultado-importacao-titulo").innerText = titulo;
+    document.getElementById("resultado-importacao-emoji").innerText = emoji;
+    document.getElementById("resultado-importacao-texto").value = texto;
+    modal.classList.remove("modal-oculto");
+}
+function fecharModalResultadoImportacao() {
+    const modal = document.getElementById("resultado-importacao-modal");
+    if (modal) modal.classList.add("modal-oculto");
+}
+function copiarResultadoImportacao(botaoEl) {
+    const textarea = document.getElementById("resultado-importacao-texto");
+    if (!textarea) return;
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length); // necessário em alguns navegadores mobile
+
+    const avisar = (ok) => {
+        if (!botaoEl) return;
+        const textoOriginal = "📋 Copiar texto";
+        botaoEl.innerText = ok ? "✅ Copiado!" : "Selecione o texto e copie com Ctrl+C";
+        setTimeout(() => { botaoEl.innerText = textoOriginal; }, 2500);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(textarea.value).then(() => avisar(true)).catch(() => avisar(false));
+    } else {
+        try { avisar(document.execCommand("copy")); } catch (e) { avisar(false); }
+    }
+}
+
 function importarApkg(event) {
     const arquivo = event.target.files[0];
     if (!arquivo) return;
@@ -1157,16 +1193,19 @@ function importarApkg(event) {
             .then(resumo => {
                 mostrarModalImportandoAnki(false);
                 salvar();
-                let msg = `Importação concluída!\n\n✅ ${resumo.sucesso} card(s) importado(s)\n⚠️ ${resumo.midiaNaoSuportada} card(s) com mídia não suportada (texto importado normalmente)\n❌ ${resumo.falhas} card(s) que falharam`;
+                let msg = `✅ ${resumo.sucesso} card(s) importado(s)\n⚠️ ${resumo.midiaNaoSuportada} card(s) com mídia não suportada (texto importado normalmente)\n❌ ${resumo.falhas} card(s) que falharam`;
                 if (resumo.exemplosFalha.length > 0) {
-                    msg += `\n\nExemplos de erro (me manda esse texto se quiser que eu investigue):\n- ${resumo.exemplosFalha.join("\n- ")}`;
+                    msg += `\n\nExemplos de erro (copie esse texto e cole na conversa se quiser que eu investigue):\n- ${resumo.exemplosFalha.join("\n- ")}`;
                 }
-                alert(msg);
+                const houveFalha = resumo.falhas > 0;
+                mostrarResultadoImportacao(houveFalha ? "Importação concluída com falhas" : "Importação concluída", houveFalha ? "⚠️" : "✅", msg);
             })
             .catch(err => {
                 console.error("Erro ao importar .apkg:", err);
                 mostrarModalImportandoAnki(false);
-                alert("Não foi possível importar esse arquivo. Verifique se é um .apkg válido exportado do Anki (baralhos muito novos, compactados com zstd, ainda não são suportados).");
+                const detalheTecnico = (err && err.message) ? err.message : String(err);
+                const msg = `Não foi possível importar esse arquivo.\n\nVerifique se é um .apkg válido exportado do Anki (baralhos muito novos, compactados com zstd, ainda não são suportados).\n\nErro técnico (copie esse texto e cole na conversa se quiser que eu investigue):\n${detalheTecnico}`;
+                mostrarResultadoImportacao("Falha ao importar", "❌", msg);
             });
     }, 50);
 }
