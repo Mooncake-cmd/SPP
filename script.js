@@ -1445,6 +1445,16 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
     }
 
     texto = texto.replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+>/g, "").trim();
+
+    // NOVO: quando vários campos foram combinados (nota com mais de 2 campos — ver converterNotaAnki),
+    // dois tipos de "sobra" ficavam feios no texto final:
+    // 1) um campo que era só imagem/áudio (ex: "Screenshot") vira um rótulo vazio ("Screenshot:") depois
+    //    que a imagem/áudio dele já foi extraída acima — essas linhas sem valor são removidas.
+    // 2) só o 1º áudio do campo inteiro vira tocável (limitação atual: 1 áudio por lado); qualquer
+    //    outra referência [sound:...] que sobrar fica como texto morto — também é removida.
+    texto = texto.replace(/\[sound:[^\]]+\]/gi, "").trim();
+    texto = texto.split("\n").map(l => l.trim()).filter(l => l && !/^[^:\n]{1,40}:\s*$/.test(l)).join("\n");
+
     texto = converterSintaxeMigaku(texto);
 
     return Promise.all(tarefas).then(() => ({ texto, imagemId, midiaId, midiaTipo, midiaNaoSuportada }));
@@ -1515,7 +1525,7 @@ function carregarRevisaoSRS() {
         cardAtualRevisao = paraRevisar[0];
         const ehCloze = cardAtualRevisao.tipo === "cloze" && cardAtualRevisao.clozePartes;
         const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) : escaparHtml(cardAtualRevisao.subtema);
-               const blocoResposta = ehCloze ? "" : `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${cardAtualRevisao.resposta ? escaparHtml(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'}</div>`;
+               const blocoResposta = ehCloze ? "" : `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${cardAtualRevisao.resposta ? escaparHtmlComQuebras(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'}</div>`;
         areaDisplay.innerHTML = `<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(cardAtualRevisao.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${cardAtualRevisao.intervalo_atual} dias</div>`;;
         controls.classList.add("oculto");
         if (btnRevelar) btnRevelar.classList.remove("oculto");
@@ -1617,7 +1627,7 @@ function renderizarListaSRS() {
             });
             corpoHtml = `<strong>🕳 ${fraseHtml}</strong><div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;">Resposta: ${escaparHtml(item.resposta)} <button class="btn-editar-cloze" onclick="carregarCardParaEdicao(${item.id})" title="Editar lacunas">✏️ Editar</button></div>`;
         } else {
-            const respostaTxt = item.resposta ? escaparHtml(item.resposta) : '(sem resposta — clique para adicionar)';
+            const respostaTxt = item.resposta ? escaparHtmlComQuebras(item.resposta) : '(sem resposta — clique para adicionar)';
             const temImagem = item.imagemPerguntaId || item.imagemRespostaId;
             corpoHtml = `<strong contenteditable="true" onblur="editarCampoSRS(${item.id}, 'subtema', this.innerText)">${escaparHtml(item.subtema)}</strong>${temImagem ? ' <span title="Este card tem imagem">🖼️</span>' : ''}<div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;" contenteditable="true" onblur="editarCampoSRS(${item.id}, 'resposta', this.innerText)">${respostaTxt}</div>`;
         }
@@ -2095,6 +2105,13 @@ function escaparHtml(texto) {
     const div = document.createElement("div");
     div.textContent = texto == null ? "" : String(texto);
     return div.innerHTML;
+}
+
+// Como escaparHtml() escapa tudo (inclusive quebras de linha, que HTML ignora dentro de uma div comum),
+// um texto com "\n" (ex: resposta de um card SRS com vários campos combinados) ficava todo espremido
+// numa linha só. Usar isso em vez de escaparHtml() sempre que o texto puder ter mais de uma linha.
+function escaparHtmlComQuebras(texto) {
+    return escaparHtml(texto).replace(/\n/g, "<br>");
 }
 
 // Evita que uma reconstrução de innerHTML disparada por um salvar() de OUTRA parte do app (ex: uma
