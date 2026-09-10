@@ -1023,7 +1023,7 @@ function renderizarNoTemaHTML(node) {
     const seta = temFilhos
         ? `<span class="srs-arvore-seta" onclick="alternarExpansaoTema('${node.caminho}', event)">${expandido ? '▾' : '▸'}</span>`
         : `<span class="srs-arvore-seta-vazia"></span>`;
-    let html = `<li class="srs-arvore-item"><label class="srs-arvore-label">${seta}<input type="checkbox" ${estado === 'marcado' ? 'checked' : ''} ${estado === 'indeterminado' ? 'data-indeterminado="true"' : ''} onclick="alternarSelecaoTema('${node.caminho}')"><span>${node.nome}</span></label>`;
+    let html = `<li class="srs-arvore-item"><div class="srs-arvore-linha"><label class="srs-arvore-label">${seta}<input type="checkbox" ${estado === 'marcado' ? 'checked' : ''} ${estado === 'indeterminado' ? 'data-indeterminado="true"' : ''} onclick="alternarSelecaoTema('${node.caminho}')"><span>${escaparHtml(node.nome)}</span></label><button type="button" class="btn-excluir-tema" onclick="excluirTema('${node.caminho}')" title="Excluir este tema e todos os cards dele">🗑️</button></div>`;
     if (temFilhos) {
         html += `<ul class="srs-arvore-filhos ${expandido ? '' : 'oculto'}">`;
         Object.values(node.filhos).sort((a,b) => a.nome.localeCompare(b.nome)).forEach(filho => { html += renderizarNoTemaHTML(filho); });
@@ -1063,6 +1063,41 @@ function abrirModalTemasSRS() {
     document.getElementById("srs-temas-modal").classList.remove("modal-oculto");
 }
 function fecharModalTemasSRS() { document.getElementById("srs-temas-modal").classList.add("modal-oculto"); }
+
+// Apaga do IndexedDB as imagens/áudios anexados a um card SRS (chamado antes de remover o card dos
+// dados, senão o arquivo fica órfão guardado pra sempre, ocupando espaço à toa).
+function excluirMidiasDoCardSRS(card) {
+    const tarefas = [];
+    if (card.imagemPerguntaId) tarefas.push(excluirImagemSRS(card.imagemPerguntaId).catch(() => {}));
+    if (card.imagemRespostaId) tarefas.push(excluirImagemSRS(card.imagemRespostaId).catch(() => {}));
+    if (card.midiaPerguntaId) tarefas.push(excluirImagemSRS(card.midiaPerguntaId).catch(() => {}));
+    if (card.midiaRespostaId) tarefas.push(excluirImagemSRS(card.midiaRespostaId).catch(() => {}));
+    return Promise.all(tarefas);
+}
+
+// NOVO: exclui um tema inteiro (e, por causa da hierarquia "::", todos os subtemas dele também) junto
+// com TODOS os cards que pertencem a ele — antes só dava pra excluir card por card.
+function excluirTema(caminho) {
+    const node = encontrarNoPorCaminho(arvoreTemasSRS, caminho);
+    if (!node) return;
+    const caminhosReais = coletarCaminhosReais(node);
+    const cardsAlvo = dados.srsItems.filter(i => caminhosReais.includes(i.tema));
+    if (cardsAlvo.length === 0) { alert("Nenhum card encontrado nesse tema."); return; }
+
+    fecharModalTemasSRS(); // evita sobrepor com o modal de confirmação abaixo
+    pedirConfirmacaoPerigosa(
+        `Excluir o tema "${node.nome}" e todos os ${cardsAlvo.length} card(s) dele (incluindo subtemas)? Essa ação não pode ser desfeita.`,
+        () => {
+            Promise.all(cardsAlvo.map(excluirMidiasDoCardSRS)).finally(() => {
+                const idsParaExcluir = new Set(cardsAlvo.map(c => c.id));
+                dados.srsItems = dados.srsItems.filter(i => !idsParaExcluir.has(i.id));
+                srsNosExpandidos.delete(caminho);
+                salvar();
+                alert(`Tema excluído: ${cardsAlvo.length} card(s) removido(s).`);
+            });
+        }
+    );
+}
 function confirmarSelecaoTemasSRS() {
     fecharModalTemasSRS();
     carregarRevisaoSRS();
@@ -1525,7 +1560,14 @@ function processarRevisaoSRS(qualidade) {
     carregarRevisaoSRS();
     atualizarEstatisticasSRS();
 }
-function removerCardSRS(id) { if(confirm("Excluir este card do deck?")) { dados.srsItems = dados.srsItems.filter(i => i.id !== id); salvar(); } }
+function removerCardSRS(id) {
+    if (!confirm("Excluir este card do deck?")) return;
+    const card = dados.srsItems.find(i => i.id === id);
+    Promise.resolve(card ? excluirMidiasDoCardSRS(card) : null).finally(() => {
+        dados.srsItems = dados.srsItems.filter(i => i.id !== id);
+        salvar();
+    });
+}
 
 function editarCampoSRS(id, campo, valor) {
     const item = dados.srsItems.find(i => i.id === id);
