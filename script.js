@@ -1285,7 +1285,25 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
 function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
     const ehCloze = modelo.type === 1 || /cloze/i.test(modelo.name || "");
     if (ehCloze) return converterNotaClozeAnki(flds[0] || "", tema, zip, nomeParaIndice);
-    return converterNotaBasicaAnki(flds[0] || "", flds[1] || "", tema, zip, nomeParaIndice);
+
+    const campoFrente = flds[0] || "";
+    let campoVerso = flds[1] || "";
+
+    // NOVO: tipos de nota mais elaborados (ex: add-on Migaku, comum em decks de chinês) não guardam a
+    // resposta só no 2º campo — o conteúdo de verdade fica espalhado em vários campos (palavra,
+    // definição, pinyin, áudio...). Se o 2º campo vier vazio mas existem mais campos com conteúdo,
+    // junta todos eles (com o nome de cada um) como resposta, em vez de descartar a nota inteira.
+    if (!campoVerso.replace(/<\/?[^>]+>/g, "").trim() && modelo.flds && flds.length > 2) {
+        const nomesCampos = modelo.flds.map(f => f.name);
+        const extras = [];
+        for (let i = 2; i < flds.length; i++) {
+            const valorBruto = (flds[i] || "").replace(/<\/?[^>]+>/g, "").trim();
+            if (valorBruto) extras.push(`${nomesCampos[i] || ("Campo " + i)}: ${flds[i]}`);
+        }
+        if (extras.length > 0) campoVerso = extras.join("<br>");
+    }
+
+    return converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaIndice);
 }
 
 // Um lado do card só é considerado "vazio de verdade" se não tiver NEM texto NEM imagem/mídia —
@@ -1386,8 +1404,43 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
     }
 
     texto = texto.replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+>/g, "").trim();
+    texto = converterSintaxeMigaku(texto);
 
     return Promise.all(tarefas).then(() => ({ texto, imagemId, midiaId, midiaTipo, midiaNaoSuportada }));
+}
+
+// NOVO: o add-on Migaku (comum em decks de chinês) guarda cada palavra no formato
+// "caractere[pinyin_com_tom_numerico;classe_gramatical]" e só converte pra pinyin com acento na hora
+// de exibir, via um JavaScript embutido no template do card — que a gente não executa. Sem isso, o
+// texto importado ficava com os colchetes crus (ex: "一点[yi1 dian3;m]"). Convertemos aqui pra texto
+// legível (ex: "一点 (yīdiǎn)"), com a mesma lógica de tom→acento que o script deles usa.
+function decodificarSilabaPinyin(silaba) {
+    const substituicoes = {
+        a: ['ā', 'á', 'ǎ', 'à'], e: ['ē', 'é', 'ě', 'è'], u: ['ū', 'ú', 'ǔ', 'ù'],
+        i: ['ī', 'í', 'ǐ', 'ì'], o: ['ō', 'ó', 'ǒ', 'ò'], 'ü': ['ǖ', 'ǘ', 'ǚ', 'ǜ']
+    };
+    const medias = ['i', 'u', 'ü'];
+    if (!silaba) return silaba;
+    const tom = parseInt(silaba[silaba.length - 1], 10);
+    if (isNaN(tom) || tom < 1 || tom > 5) return silaba; // não é sílaba com tom numérico no final
+    const semV = silaba.replace(/v/g, 'ü');
+    if (tom === 5) return semV.slice(0, -1); // tom neutro: só tira o número, sem acento
+    for (let i = 0; i < semV.length; i++) {
+        const c1 = semV[i], c2 = semV[i + 1];
+        if (medias.includes(c1) && substituicoes[c2]) return semV.slice(0, i + 1) + substituicoes[c2][tom - 1] + semV.slice(i + 2, -1);
+        if (substituicoes[c1]) return semV.slice(0, i) + substituicoes[c1][tom - 1] + semV.slice(i + 1, -1);
+    }
+    return silaba;
+}
+function converterSintaxeMigaku(texto) {
+    if (!texto || texto.indexOf('[') === -1) return texto;
+    return texto.replace(/([一-鿿]+?)\[(.*?)\]/g, (match, hanzi, colchete) => {
+        const leitura = (colchete.split(';')[0] || '').trim();
+        const silabas = leitura.match(/\S+?\d/g) || [];
+        if (silabas.length === 0) return hanzi;
+        const pinyin = silabas.map(decodificarSilabaPinyin).join('');
+        return `${hanzi} (${pinyin})`;
+    });
 }
 
 function carregarRevisaoSRS() {
