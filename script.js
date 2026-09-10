@@ -3725,20 +3725,36 @@ function gerarBackupComLivros(livrosParaIncluirArquivo) {
     const pastaLivros = zip.folder("livros");
     const pastaImagens = zip.folder("imagens_srs");
 
-    const tarefasLivros = livrosParaIncluirArquivo.map(livro =>
+    // NOVO: carrega os arquivos em lotes pequenos (em vez de todos os livros/imagens em paralelo de
+    // uma vez só) — evita ter, por exemplo, vários PDFs grandes na memória ao mesmo tempo, o que
+    // travava em máquinas com pouca RAM. O resultado continua sendo um único .zip no final; só a
+    // leitura dos arquivos fica espaçada em grupos pequenos.
+    const TAMANHO_LOTE = 3;
+    function processarEmLotes(itens, processarItem) {
+        let indice = 0;
+        function proximoLote() {
+            if (indice >= itens.length) return Promise.resolve();
+            const lote = itens.slice(indice, indice + TAMANHO_LOTE);
+            indice += TAMANHO_LOTE;
+            return Promise.all(lote.map(processarItem)).then(proximoLote);
+        }
+        return proximoLote();
+    }
+
+    processarEmLotes(livrosParaIncluirArquivo, livro =>
         carregarArquivoLivro(livro.id).then(arrayBuffer => {
             if (arrayBuffer) pastaLivros.file(`${livro.id}.bin`, arrayBuffer);
         }).catch(() => {})
-    );
-    const tarefasImagens = [...idsImagens].map(id =>
-        carregarImagemSRS(id).then(blob => {
-            if (blob) pastaImagens.file(`${id}.jpg`, blob);
-        }).catch(() => {})
-    );
-
-    Promise.all([...tarefasLivros, ...tarefasImagens])
-        .then(() => zip.generateAsync({ type: "blob" }))
-        .then(blob => baixarBlobComoArquivo(blob, "backup_rpg_vida.zip"))
+    )
+        .then(() => processarEmLotes([...idsImagens], id =>
+            carregarImagemSRS(id).then(blob => {
+                if (blob) pastaImagens.file(`${id}.jpg`, blob);
+            }).catch(() => {})
+        ))
+        // streamFiles: reduz o pico de memória do JSZip ao montar o zip final (não precisa saber o
+        // tamanho comprimido de cada arquivo de antemão antes de escrevê-lo).
+        .then(() => zip.generateAsync({ type: "blob", streamFiles: true }))
+        .then(blob => baixarBlobComoArquivo(blob, "backup_rpg.zip"))
         .catch(err => {
             console.error("Erro ao gerar backup com livros:", err);
             alert("Não foi possível gerar o backup com os arquivos. Tente novamente ou exporte só os dados.");
