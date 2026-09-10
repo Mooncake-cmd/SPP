@@ -1,0 +1,714 @@
+﻿<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sistema Pessoal Hardcore</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.js"></script>   
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <main class="container">
+        
+        <div class="header-top">
+            <h1>Sistema de Progresso Pessoal</h1>
+            <button onclick="alternarTema()" id="btn-tema" class="btn-tema" title="Alternar Tema">🌙</button>
+        </div>
+       
+        <p id="data" class="data-atual"></p>
+
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="abrirAba(event, 'aba-rpg')">🎮 RPG de Vida</button>
+            <button class="tab-btn" onclick="abrirAba(event, 'aba-timer')">⏱️ Foco (Pomodoro)</button>
+            <button class="tab-btn" onclick="abrirAba(event, 'aba-objetivos')">🚀 Objetivos & Futuro</button>
+            <button class="tab-btn" onclick="abrirAba(event, 'aba-srs')">🧠 Revisão Inteligente</button>
+            <button class="tab-btn" onclick="abrirAba(event, 'aba-biblioteca')">📚 Biblioteca</button>
+            <button class="tab-btn" onclick="abrirAba(event, 'aba-financas')">💰 Finanças</button>
+        </div>
+
+        <div id="aba-rpg" class="tab-content active">
+            <section class="status card">
+                <h2>Status do Jogador</h2>
+                <div class="status-box">
+                    <div><strong>Nível atual</strong><p id="nivel">0</p></div>
+                    <div><strong>Faltam para o próximo</strong><p id="faltam">0</p></div>
+                    <div><strong>🔥 Sequência</strong><p id="streak-atual">0</p><span class="status-recorde-txt">Recorde: <span id="streak-recorde">0</span></span></div>
+                </div>
+
+                <div class="container-barra-status">
+                    <div style="display:flex; justify-content:space-between; font-size:0.9em; font-weight:bold; color: var(--danger-color); margin-bottom: 5px;">
+                        <span>❤️ HP (Saúde)</span>
+                        <span id="texto-hp">300 / 300</span>
+                    </div>
+                    <div class="barra-fundo-hp"><div id="barra-hp-fill"></div></div>
+                    <div id="texto-dano-previsto" class="dano-previsto-txt"></div>
+                </div>
+
+                <div class="container-barra-status" style="margin-top: 15px;">
+                    <div style="display:flex; justify-content:space-between; font-size:0.9em; font-weight:bold; color: var(--primary-color); margin-bottom: 5px;">
+                        <span>⭐ XP (Experiência)</span>
+                        <span>Pontos Totais: <span id="total-geral">0</span></span>
+                    </div>
+                    <div class="barra"><div id="progresso"></div></div>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Adicionar Missão</h2>
+                <div class="form-group">
+                    <input type="text" id="desc" placeholder="Tarefa (ex: Ler Livro)">
+                    <input type="number" id="pts" placeholder="Pontos (Dano se falhar)">
+                    <input type="text" id="attrs" placeholder="Atributos (ex: Inteligência, Foco)">
+                    <input type="text" id="cat" placeholder="Categoria (Opcional)">
+                    <select id="item-recorrencia" onchange="alternarCampoDiaSemana()">
+                        <option value="diaria">Diária</option>
+                        <option value="semanal">Semanal</option>
+                    </select>
+                    <select id="item-dia-semana" class="oculto">
+                        <option value="0">Todo Domingo</option>
+                        <option value="1">Toda Segunda</option>
+                        <option value="2">Toda Terça</option>
+                        <option value="3">Toda Quarta</option>
+                        <option value="4">Toda Quinta</option>
+                        <option value="5">Toda Sexta</option>
+                        <option value="6">Todo Sábado</option>
+                    </select>
+                    <button onclick="adicionarItem()">Adicionar</button>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Checklist Diário</h2>
+                <div id="checklists"></div>
+            </section>
+
+            <section class="card">
+                <h2>🛍️ Loja de Recompensas</h2>
+                <div class="form-group">
+                    <input type="text" id="recompensa-nome" placeholder="Recompensa (ex: Episódio Série)">
+                    <input type="number" id="recompensa-custo" placeholder="Custo (Pts)">
+                    <button onclick="adicionarRecompensa()" style="background-color: #ff9800;">+ Loja</button>
+                </div>
+                <div id="lista-recompensas" style="margin-top: 15px;"></div>
+                
+                <h3 style="margin-top: 20px; border-top: 1px solid var(--border-color); padding-top: 10px;">🏥 Enfermaria (Poções)</h3>
+                <div class="potions-container">
+                    <button onclick="comprarPocao(100, 10)" class="btn-pocao">🍷 Poção Pequena<br><small>Cura 10 HP (100 XP)</small></button>
+                    <button onclick="comprarPocao(500, 50)" class="btn-pocao">🧪 Poção Média<br><small>Cura 50 HP (500 XP)</small></button>
+                    <button onclick="comprarPocao(900, 90)" class="btn-pocao">⚗️ Poção Grande<br><small>Cura 90 HP (900 XP)</small></button>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Radar de Atributos</h2>
+                <div style="position: relative; height: 300px; width: 100%; max-width: 500px; margin: 0 auto;">
+                    <canvas id="radarChart"></canvas>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>📈 Histórico (últimos 30 dias)</h2>
+                <div style="position: relative; height: 280px; width: 100%; max-width: 700px; margin: 0 auto;">
+                    <canvas id="historicoChart"></canvas>
+                </div>
+            </section>
+        </div> 
+
+        <div id="aba-timer" class="tab-content">
+            <section class="card timer-container">
+                <h2>⏱️ Central de Estudos</h2>
+                
+                <div class="estudo-setup">
+                    <h3 style="margin-top:0; font-size: 1.1em; color: var(--secondary-color);">Planejamento da Sessão</h3>
+                    <div class="form-group">
+                        <input type="text" id="materia-atual" placeholder="Matéria (ex: Matemática)" list="sugestoes-materias">
+                        <datalist id="sugestoes-materias"></datalist> 
+                        <div id="meta-sessao-container" style="display: flex; align-items: center; gap: 5px;">
+                            <label>Meta (Sessões):</label>
+                            <input type="number" id="meta-sessoes" value="4" min="1" style="width: 60px;">
+                        </div>
+                    </div>
+                    <p id="feedback-meta" style="font-size: 0.9em; color: var(--text-secondary); margin-top: 5px;">Sessões concluídas hoje: 0</p>
+                </div>
+
+                <div class="estudo-setup" style="border-left: 5px solid var(--primary-color);">
+                    <h3 style="margin-top:0; font-size: 1.1em; color: var(--primary-color);">🎯 Metas de Longo Prazo</h3>
+                    <div class="meta-container">
+                        <div class="meta-header">
+                            <span>📅 Este Mês (<span id="label-mes-atual"></span>)</span>
+                            <div style="display:flex; align-items:center; gap:5px;">
+                                <span style="font-size:0.8em;">Meta (h):</span>
+                                <input type="number" id="meta-horas-mes" value="50" onchange="salvarMetasGlobais()" class="input-mini">
+                            </div>
+                        </div>
+                        <div class="barra"><div id="progresso-mes"></div></div>
+                        <p id="texto-progresso-mes" class="texto-meta">0h / 50h</p>
+                    </div>
+                    <div class="meta-container" style="margin-top: 15px;">
+                        <div class="meta-header">
+                            <span>🌎 Este Ano (<span id="label-ano-atual"></span>)</span>
+                            <div style="display:flex; align-items:center; gap:5px;">
+                                <span style="font-size:0.8em;">Meta (h):</span>
+                                <input type="number" id="meta-horas-ano" value="500" onchange="salvarMetasGlobais()" class="input-mini">
+                            </div>
+                        </div>
+                        <div class="barra"><div id="progresso-ano"></div></div>
+                        <p id="texto-progresso-ano" class="texto-meta">0h / 500h</p>
+                    </div>
+                </div>
+
+                <div class="timer-display">
+                    <span id="timer-minutos">25</span>:<span id="timer-segundos">00</span>
+                </div>
+                
+                <p id="previsao-termino" class="previsao-timer oculto">🏁 Termina às: --:--</p>
+
+                <div class="timer-config">
+                    <div class="config-group">
+                        <label>Foco (min):</label>
+                        <input type="number" id="input-foco" value="25" min="1">
+                    </div>
+                    <div class="config-group">
+                        <label>Descanso (min):</label>
+                        <input type="number" id="input-descanso" value="5" min="1">
+                    </div>
+                </div>
+
+                <div class="timer-config" style="margin-top: 10px; border-top: 1px dashed var(--border-color); padding-top: 15px; flex-direction: column; gap: 10px;">
+                    <div class="config-group" style="flex-direction: row; gap: 10px;">
+                        <label>Som:</label>
+                        <select id="select-som" onchange="salvarPreferenciasTimer()">
+                            <option value="sino">🔔 Sino Tibetano</option>
+                            <option value="levelup">🆙 Level Up (Game)</option>
+                            <option value="bipe">🤖 Bipe Digital</option>
+                            <option value="natureza">🐦 Pássaros</option>
+                        </select>
+                    </div>
+                    <div class="config-check-group">
+                        <label style="font-size: 0.9em; cursor: pointer;">
+                            <input type="checkbox" id="check-notificacao" onchange="gerenciarNotificacao(this)"> Ativar Notificação
+                        </label>
+                        <label style="font-size: 0.9em; cursor: pointer;">
+                            <input type="checkbox" id="check-previsao" onchange="salvarPreferenciasTimer()"> Mostrar Previsão de Término
+                        </label>
+                    </div>
+                </div>
+
+                <div class="timer-controls">
+                    <button onclick="iniciarTimer()" id="btn-timer-principal">Iniciar Foco</button>
+                    <button onclick="resetarTimer()" id="btn-reset" style="background: var(--text-secondary);">Resetar</button>
+                </div>
+
+                <p id="timer-status" style="margin-top: 15px; font-weight: bold; color: var(--secondary-color);">Status: Pronto para focar!</p>
+
+                <div id="estatisticas-estudo" style="margin-top: 30px; border-top: 2px solid var(--border-color); padding-top: 10px;">
+                    <h3>📝 Log de Sessões (Recentes)</h3>
+                    <table class="tabela-checklist">
+                        <thead><tr><th>Data</th><th>Matéria</th><th>Duração</th></tr></thead>
+                        <tbody id="corpo-historico"></tbody>
+                    </table>
+                    <button onclick="limparHistorico()" style="background: var(--text-secondary); margin-top: 10px; font-size: 0.7em;">Limpar Log</button>
+                </div>
+
+                <div style="margin-top: 30px; border-top: 4px solid var(--secondary-color); padding-top: 20px; background: var(--table-header-bg); border-radius: 8px;">
+                    <h3>📚 Totais Acumulados por Matéria</h3>
+                    <table class="tabela-checklist">
+                        <thead>
+                            <tr style="background: var(--table-row-hover);">
+                                <th>Matéria</th>
+                                <th>Tempo Total</th>
+                                <th>Ação</th>
+                            </tr>
+                        </thead>
+                        <tbody id="corpo-materias"></tbody>
+                    </table>
+                </div>
+
+                <div style="margin-top: 30px;">
+                    <h3>📊 Distribuição por Matéria</h3>
+                    <div style="position: relative; height: 280px; width: 100%; max-width: 600px; margin: 0 auto;">
+                        <canvas id="materiasChart"></canvas>
+                    </div>
+                </div>
+            </section>
+        </div> 
+
+        <div id="aba-objetivos" class="tab-content">
+            <section class="card">
+                <h2>Novo Objetivo / Aprendizado</h2>
+                <div class="form-group">
+                    <input type="text" id="obj-titulo" placeholder="Título (ex: Aprender Piano)">
+                    <select id="obj-tipo">
+                        <option value="cascata">🏔️ Meta em Cascata</option>
+                        <option value="aprendizado">🧪 Laboratório de Estudo</option>
+                    </select>
+                    <input type="date" id="obj-prazo" title="Prazo (opcional)">
+                    <button onclick="adicionarObjetivo()">Criar</button>
+                </div>
+            </section>
+
+            <div class="flex-columns">
+                <section class="card coluna-metas">
+                    <h3 style="border-bottom: 2px solid var(--primary-color); padding-bottom:10px;">🏔️ Metas de Vida</h3>
+                    <div id="lista-cascata"></div>
+                </section>
+                <section class="card coluna-metas">
+                    <h3 style="border-bottom: 2px solid var(--secondary-color); padding-bottom:10px;">🧪 Laboratório de Skills</h3>
+                    <div id="lista-aprendizado"></div>
+                </section>
+            </div>
+
+            <section class="card">
+                <h2 style="color: #ff9800;">🏆 Galeria de Conquistas</h2>
+                <div id="historico-conquistas" class="historico-grid"></div>
+                <div style="text-align: center; margin-top: 15px;">
+                    <button onclick="limparConquistas()" style="background: var(--text-secondary); font-size: 0.8em; padding: 5px 10px;">Limpar Histórico</button>
+                </div>
+            </section>
+        </div>
+
+        <div id="aba-srs" class="tab-content">
+            <datalist id="lista-temas-srs"></datalist>
+
+            <section class="card">
+                <h2>📥 Importar do Anki</h2>
+                <p style="font-size: 0.85em; color: var(--text-secondary); margin-top: -8px;">Suba um arquivo <code>.apkg</code> exportado do Anki — os cards são adicionados ao seu deck atual, sem apagar nada que já existe.</p>
+                <div class="form-group">
+                    <input type="file" id="input-importar-apkg" accept=".apkg" style="display:none" onchange="importarApkg(event)">
+                    <button onclick="document.getElementById('input-importar-apkg').click()">📥 Escolher arquivo .apkg</button>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Adicionar ao Deck</h2>
+                <div class="form-group">
+                    <input type="text" id="srs-tema" list="lista-temas-srs" placeholder="Tema (ex: Matemática::Álgebra)">
+                    <input type="text" id="srs-subtema" placeholder="Subtema / Pergunta (ex: O que é Dolo?)">
+                    <input type="text" id="srs-resposta" placeholder="Resposta (opcional)">
+                    <button type="button" class="btn-cloze-marcar" id="btn-cloze-srs" onclick="alternarModoClozeSRS('srs')">🕳 Marcar lacunas</button>
+                    <button onclick="adicionarCardSRS()" id="btn-adicionar-card-srs">+ Card</button>
+                    <button onclick="cancelarEdicaoCardSRS()" id="btn-cancelar-edicao-srs" class="oculto" style="background: var(--text-secondary);">Cancelar edição</button>
+                </div>
+                <div class="form-group-imagens-srs">
+                    <label class="label-imagem-srs">🖼️ Imagem na pergunta
+                        <input type="file" id="srs-imagem-pergunta" accept="image/*" onchange="selecionarImagemCard('srs','pergunta',this)">
+                    </label>
+                    <span id="srs-imagem-pergunta-preview" class="imagem-srs-preview-mini oculto"></span>
+                    <label class="label-imagem-srs">🖼️ Imagem na resposta
+                        <input type="file" id="srs-imagem-resposta" accept="image/*" onchange="selecionarImagemCard('srs','resposta',this)">
+                    </label>
+                    <span id="srs-imagem-resposta-preview" class="imagem-srs-preview-mini oculto"></span>
+                </div>
+                <div id="srs-cloze-preview" class="cloze-preview oculto"></div>
+            </section>
+
+            <section class="card" id="srs-area-revisao">
+                <h2>Revisão Diária</h2>
+
+                <div class="form-group" style="margin-bottom: 15px;">
+                    <button id="btn-escolher-temas-srs" class="btn-escolher-temas" onclick="abrirModalTemasSRS()">🗂️ Todos os temas</button>
+                </div>
+                
+                <div id="srs-card-display" class="srs-card-container">
+                    <div id="srs-conteudo-front">
+                        <p style="color: var(--text-secondary); font-style: italic;">Carregando revisões...</p>
+                    </div>
+                </div>
+
+                <button id="btn-revelar-resposta" class="btn-revelar-resposta oculto" onclick="revelarRespostaSRS()">👁️ Mostrar Resposta</button>
+
+                <div id="srs-controls" class="srs-controls oculto">
+                    <button onclick="processarRevisaoSRS('dificil')" class="btn-srs-dificil">Difícil (1d)</button>
+                    <button onclick="processarRevisaoSRS('bom')" class="btn-srs-bom">Bom (Manter)</button>
+                    <button onclick="processarRevisaoSRS('facil')" class="btn-srs-facil">Fácil (Bônus)</button>
+                </div>
+                
+                <p id="srs-feedback" style="text-align: center; margin-top: 10px; color: var(--text-secondary); font-size: 0.9em;"></p>
+            </section>
+
+            <section class="card">
+                <h3>🗂️ Deck Completo</h3>
+                <p id="srs-estatisticas" class="srs-estatisticas"></p>
+                <div id="lista-srs-completa" class="srs-lista-container"></div>
+            </section>
+        </div>
+
+        <div id="aba-biblioteca" class="tab-content">
+            <section class="card">
+                <h2>📚 Biblioteca de Livros</h2>
+                <input type="file" id="input-livro-upload" accept=".pdf,.epub,.cbz,application/pdf,application/epub+zip" multiple style="display:none" onchange="handleUploadLivros(event)">
+                <div class="biblioteca-upload-area" id="area-upload-livro" onclick="document.getElementById('input-livro-upload').click()">
+                    <span class="upload-icon">📤</span>
+                    <p>Clique para enviar um ou mais livros (PDF, EPUB ou CBZ)</p>
+                    <small>Os arquivos ficam salvos apenas neste navegador/dispositivo</small>
+                </div>
+                <p id="biblioteca-status-import" class="biblioteca-status-import"></p>
+            </section>
+
+            <section class="card">
+                <h2>📖 Lendo agora</h2>
+                <div id="lista-biblioteca" class="biblioteca-grid">
+                    <p class="biblioteca-vazio">Nenhum livro em andamento. Envie um PDF, EPUB ou CBZ acima para começar.</p>
+                </div>
+            </section>
+
+            <section class="card leitor-pdf-container oculto" id="leitor-pdf">
+                <div class="leitor-header">
+                    <h3 id="leitor-titulo-livro">Título do livro</h3>
+                    <div class="leitor-header-botoes">
+                        <button class="btn-leitor-icone" id="btn-busca-livro" onclick="alternarBuscaLivro()" title="Buscar no livro">🔍</button>
+                        <button class="btn-leitor-icone" onclick="fecharLeitor()" title="Fechar leitor">✕</button>
+                    </div>
+                </div>
+
+                <div class="leitor-busca oculto" id="leitor-busca">
+                    <input type="text" id="input-busca-livro" placeholder="Buscar no livro..." onkeydown="if(event.key==='Enter') buscarNoLivro()">
+                    <button onclick="buscarNoLivro()">Buscar</button>
+                    <span id="busca-resultado-info" class="busca-resultado-info"></span>
+                    <button onclick="navegarResultadoBusca(-1)" id="btn-busca-anterior" disabled>◀</button>
+                    <button onclick="navegarResultadoBusca(1)" id="btn-busca-proxima" disabled>▶</button>
+                </div>>
+
+                <div class="leitor-canvas-wrapper">
+                    <div class="pdf-page-wrapper" id="pdf-page-wrapper">
+                        <canvas id="pdf-canvas"></canvas>
+                        <div id="pdf-text-layer"></div>
+                    </div>
+                    <div id="epub-viewer" class="oculto"></div>
+                    <div id="cbz-viewer" class="oculto">
+                        <img id="cbz-imagem" alt="Página do quadrinho">
+                    </div>
+                </div>
+
+                <div class="leitor-controles">
+                    <button onclick="paginaAnterior()" id="btn-pagina-anterior">◀ Anterior</button>
+                    <span class="leitor-pagina-info" id="leitor-pagina-info">Pág. 0 / 0</span>
+                    <button onclick="proximaPagina()" id="btn-pagina-proxima">Próxima ▶</button>
+                    <button onclick="finalizarLeituraAtual()" id="btn-finalizar-leitura" class="oculto">🏁 Finalizar</button>
+                </div>
+
+                <div class="leitor-ir-pagina" id="form-ir-pagina">
+                    <input type="number" id="input-ir-pagina" min="1" placeholder="Nº da página" onkeydown="if(event.key==='Enter') irParaPaginaDigitada()">
+                    <button onclick="irParaPaginaDigitada()">Ir</button>
+                </div>
+
+                <div class="leitor-selecao-barra oculto" id="leitor-selecao-barra">
+                    <span class="leitor-selecao-texto" id="leitor-selecao-texto">"..."</span>
+                    <button onclick="abrirModalAnotacao()">📝 Anotar</button>
+                    <button onclick="abrirModalSrsRapido()">🧠 Virar Card SRS</button>
+                </div>
+
+                <div class="anotacoes-toggle-area">
+                    <button class="btn-toggle-anotacoes" onclick="alternarListaAnotacoes()" id="btn-toggle-anotacoes">📝 Minhas Anotações (0)</button>
+                    <ul class="lista-anotacoes oculto" id="lista-anotacoes"></ul>
+                </div>
+            </section>
+
+            <section class="card estante-titulo-secao">
+                <h2 style="color: #ff9800; cursor: pointer;" onclick="alternarEstanteConcluidos()">
+                    <span id="seta-estante">▶</span> 🏆 Estante (Livros Concluídos)
+                </h2>
+                <div id="estante-grid" class="estante-grid oculto">
+                    <p class="biblioteca-vazio">Nenhum livro concluído ainda.</p>
+                </div>
+            </section>
+        </div>
+
+        <div id="aba-financas" class="tab-content">
+
+            <div id="financas-banner-vencimento" class="financas-banner-vencimento oculto"></div>
+
+            <!-- 2) Saldo e resumo do mês -->
+            <section class="card">
+                <h2>💰 Resumo do Mês</h2>
+                <div class="status-box">
+                    <div><strong>Entradas</strong><p id="financas-total-entradas" style="color:#4caf50;">R$ 0,00</p></div>
+                    <div><strong>Saídas</strong><p id="financas-total-saidas" style="color:var(--danger-color);">R$ 0,00</p></div>
+                    <div><strong>Saldo</strong><p id="financas-saldo">R$ 0,00</p></div>
+                </div>
+            </section>
+
+            <!-- 1) Registro de lançamentos -->
+            <section class="card">
+                <h2>Novo Lançamento</h2>
+                <div class="form-group">
+                    <input type="date" id="financas-lanc-data">
+                    <select id="financas-lanc-tipo">
+                        <option value="saida">Saída</option>
+                        <option value="entrada">Entrada</option>
+                    </select>
+                    <select id="financas-lanc-categoria" class="select-categoria-financas"></select>
+                    <input type="number" id="financas-lanc-valor" placeholder="Valor (R$)" step="0.01" min="0">
+                    <input type="text" id="financas-lanc-descricao" placeholder="Descrição (opcional)">
+                    <button onclick="adicionarLancamento()">+ Lançar</button>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>Lançamentos do Mês</h2>
+                <div style="overflow-x:auto;">
+                    <table class="tabela-financas">
+                        <thead><tr><th>Data</th><th>Tipo</th><th>Categoria</th><th>Valor</th><th>Descrição</th><th></th></tr></thead>
+                        <tbody id="corpo-lancamentos"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- NOVO: Histórico mensal expansível (resumo de todos os meses fechados) -->
+            <section class="card">
+                <h2 style="cursor: pointer;" onclick="alternarHistoricoMensalFinancas()">
+                    <span id="seta-historico-financas">▶</span> 📖 Histórico Mensal Detalhado
+                </h2>
+                <div id="lista-historico-mensal-financas" class="oculto"></div>
+            </section>
+
+            <!-- 3) Categorias customizáveis -->
+            <section class="card">
+                <h2>Categorias</h2>
+                <div class="form-group">
+                    <input type="text" id="financas-nova-categoria" placeholder="Nova categoria (ex: Saúde)">
+                    <button onclick="adicionarCategoriaFinancas()">+ Categoria</button>
+                </div>
+                <div id="lista-categorias-financas" class="lista-categorias-financas"></div>
+            </section>
+
+            <!-- 8) Orçamento por categoria -->
+            <section class="card">
+                <h2>Orçamento por Categoria</h2>
+                <p style="font-size:0.85em; color:var(--text-secondary); margin-top:-10px;">Defina um limite mensal opcional pra cada categoria. Se ultrapassar, ela fica destacada em vermelho.</p>
+                <div id="lista-orcamentos-financas" class="lista-orcamentos-financas"></div>
+            </section>
+
+            <!-- 4) Gráfico de gastos por categoria -->
+            <section class="card">
+                <h2>Gastos por Categoria (mês atual)</h2>
+                <div class="grafico-container" style="height:280px;"><canvas id="graficoCategoriasChart"></canvas></div>
+            </section>
+
+            <!-- 7) Histórico mensal comparativo -->
+            <section class="card">
+                <h2>Histórico Mensal (últimos 6 meses)</h2>
+                <div class="grafico-container" style="height:280px;"><canvas id="graficoHistoricoFinancasChart"></canvas></div>
+            </section>
+
+            <!-- NOVO: Investimentos (acompanhamento semanal/mensal/total) -->
+            <section class="card">
+                <h2>📈 Investimentos</h2>
+                <p style="font-size:0.85em; color:var(--text-secondary); margin-top:-10px;">Atualize o valor total guardado sempre que quiser (ex: toda semana) — o sistema calcula o rendimento sozinho.</p>
+                <div class="form-group">
+                    <input type="number" id="financas-invest-valor" placeholder="Valor total guardado agora (R$)" step="0.01" min="0">
+                    <input type="number" id="financas-invest-aporte" placeholder="Quanto você aportou agora? (0 se não aportou)" step="0.01" min="0">
+                    <button onclick="registrarAtualizacaoInvestimento()">Atualizar valor</button>
+                    <button onclick="removerUltimaAtualizacaoInvestimento()" style="background: var(--text-secondary);" title="Desfazer a última atualização, caso tenha digitado errado">Desfazer última</button>
+                </div>
+                <div id="financas-invest-resumo"></div>
+            </section>
+
+            <!-- 5) Metas de economia -->
+            <section class="card">
+                <h2>🎯 Metas de Economia</h2>
+                <div class="form-group">
+                    <input type="text" id="financas-meta-nome" placeholder="Nome da meta (ex: Viagem)">
+                    <input type="number" id="financas-meta-valor" placeholder="Valor alvo (R$)" step="0.01" min="0">
+                    <input type="date" id="financas-meta-prazo" title="Prazo (opcional)">
+                    <button onclick="adicionarMetaFinancas()">+ Meta</button>
+                </div>
+                <div id="lista-metas-financas"></div>
+            </section>
+
+            <!-- 6) Gastos fixos recorrentes -->
+            <section class="card">
+                <h2>📌 Gastos Fixos Recorrentes</h2>
+                <div class="form-group">
+                    <input type="text" id="financas-fixa-nome" placeholder="Nome (ex: Aluguel)">
+                    <input type="number" id="financas-fixa-valor" placeholder="Valor (R$)" step="0.01" min="0">
+                    <input type="number" id="financas-fixa-dia" placeholder="Dia do vencimento" min="1" max="31">
+                    <select id="financas-fixa-categoria" class="select-categoria-financas"></select>
+                    <button onclick="adicionarContaFixa()">+ Conta Fixa</button>
+                </div>
+                <div id="lista-contas-fixas"></div>
+            </section>
+
+        </div>
+
+        <section class="card">
+            <h2>Gerenciar Dados</h2>
+            <div class="form-group">
+                <button onclick="exportarDados()" class="btn-exportar">Exportar Backup</button>
+                <input type="file" id="importarArquivo" accept=".json,.zip" style="display: none;" onchange="importarDados(event)">
+                <button onclick="document.getElementById('importarArquivo').click()" class="btn-importar">Importar Backup</button>
+                <button onclick="confirmarResetTotal()" class="btn-resetar">Resetar Tudo</button>
+            </div>
+        </section>
+
+    </main>
+
+    <div id="level-up-modal" class="modal-oculto">
+        <div class="modal-content">
+            <span class="emoji">🎊</span>
+            <h2>LEVEL UP!</h2>
+            <p style="color: #333;">Incrível! Você subiu para o nível <span id="novo-nivel-display">0</span>!</p>
+            <button onclick="fecharModal()">Continuar Focado</button>
+        </div>
+    </div>
+    
+    <div id="dano-modal" class="modal-oculto">
+        <div class="modal-content" style="border: 4px solid var(--danger-color);">
+            <span class="emoji">🩸</span>
+            <h2 style="color: var(--danger-color);">DIA NOVO, VIDA PERDIDA</h2>
+            <p style="color: #333;">Você deixou tarefas pendentes ontem.</p>
+            <p style="font-size: 1.5em; font-weight: bold; color: var(--danger-color); margin: 10px 0;">-<span id="display-dano-tomado">0</span> HP</p>
+            <p style="font-size: 0.9em; color: #666;">Complete missões hoje para recuperar vida!</p>
+            <button onclick="fecharModalDano()" style="background-color: var(--danger-color);">Entendido</button>
+        </div>
+    </div>
+
+    <div id="gameover-modal" class="modal-oculto">
+        <div class="modal-content" style="background-color: #000; border: 4px solid var(--danger-color); color: white;">
+            <span class="emoji">☠️</span>
+            <h1 style="color: var(--danger-color); font-size: 2.5em; margin: 0;">GAME OVER</h1>
+            <p style="color: #ddd; margin-top: 20px;">Sua vida chegou a 0.</p>
+            <p style="color: #999; font-size: 0.9em;">Como na vida real, o tempo não volta.<br>Todo o progresso será perdido — exceto suas missões do Checklist.</p>
+            <button onclick="confirmarGameOver()" style="background-color: var(--danger-color); color: white; margin-top: 30px; width: 100%; font-size: 1.2em;">REINICIAR</button>
+        </div>
+    </div>
+
+    <div id="exportar-backup-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 460px;">
+            <span class="emoji">💾</span>
+            <h2>Exportar Backup</h2>
+            <p id="exportar-backup-mensagem" style="color: #333; font-size: 0.9em;">Deseja incluir os arquivos dos livros da Biblioteca no backup? (As imagens dos cards SRS são sempre incluídas junto, quando o backup tiver arquivos.)</p>
+            <div class="form-group" style="flex-direction: column; gap: 8px;">
+                <button onclick="exportarSoDados()" style="background: var(--text-secondary);">📄 Só os dados (sem arquivos, mais leve)</button>
+                <button onclick="exportarComTodosLivros()">📚 Todos os livros (Lendo agora + Estante)</button>
+                <button onclick="exportarComLivrosEmAndamento()">📖 Só os livros que estou lendo agora</button>
+                <button onclick="fecharModalExportarBackup()" style="background: var(--danger-color); margin-top: 8px;">Cancelar</button>
+            </div>
+        </div>
+    </div>
+
+        <div id="importando-anki-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 380px;">
+            <span class="emoji">⏳</span>
+            <h2>Importando...</h2>
+            <p style="color: #333; font-size: 0.9em;">Lendo o baralho do Anki, isso pode levar alguns segundos dependendo do tamanho do arquivo. Não feche nem recarregue a página.</p>
+        </div>
+    </div>
+
+    <div id="desenho-imagem-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 90vw; width: 700px;">
+            <h2>🖍 Cubra a área que quiser</h2>
+            <p style="font-size: 0.85em; color: var(--text-secondary); margin-top: -8px;">Arraste o mouse sobre a imagem pra desenhar um retângulo colorido em cima (ex: pra tampar a resposta).</p>
+            <div class="desenho-imagem-cor-opcoes">
+                <button type="button" class="swatch-cor" data-cor="#000000" style="background:#000000;" onclick="selecionarCorDesenho(this)" title="Preto"></button>
+                <button type="button" class="swatch-cor ativo" data-cor="#ffeb3b" style="background:#ffeb3b;" onclick="selecionarCorDesenho(this)" title="Amarelo"></button>
+                <button type="button" class="swatch-cor" data-cor="#e53935" style="background:#e53935;" onclick="selecionarCorDesenho(this)" title="Vermelho"></button>
+                <button type="button" class="swatch-cor" data-cor="#43a047" style="background:#43a047;" onclick="selecionarCorDesenho(this)" title="Verde"></button>
+            </div>
+            <div class="desenho-imagem-canvas-wrapper">
+                <canvas id="desenho-imagem-canvas"></canvas>
+            </div>
+            <div class="form-group" style="margin-top: 12px;">
+                <button type="button" onclick="limparDesenhoImagem()" style="background: var(--text-secondary);">Limpar desenho</button>
+                <button type="button" onclick="cancelarDesenhoImagem()" style="background: var(--danger-color);">Cancelar</button>
+                <button type="button" onclick="confirmarDesenhoImagem()">✔️ Usar esta imagem</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="prateleira-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 420px;">
+            <span class="emoji">📁</span>
+            <h2>Mover para prateleira</h2>
+            <div id="prateleira-lista-existentes" class="prateleira-lista-existentes"></div>
+            <div class="form-group" style="margin-top: 15px;">
+                <input type="text" id="prateleira-nome-input" placeholder="Nome de uma nova prateleira" onkeydown="if(event.key==='Enter') confirmarNovaPrateleira()">
+                <button onclick="confirmarNovaPrateleira()">Criar e mover</button>
+            </div>
+            <div class="form-group" style="margin-top: 10px;">
+                <button onclick="removerLivroDaPrateleira()" style="background: var(--text-secondary);">Remover da prateleira</button>
+                <button onclick="fecharModalPrateleira()" style="background: var(--danger-color);">Cancelar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="confirmacao-perigosa-modal" class="modal-oculto">
+        <div class="modal-content" style="border: 4px solid var(--danger-color);">
+            <span class="emoji">⚠️</span>
+            <h2 style="color: var(--danger-color);">Confirmação necessária</h2>
+            <p id="confirmacao-perigosa-mensagem" style="color: #333;">Esta ação não pode ser desfeita.</p>
+            <input type="text" id="confirmacao-perigosa-input" placeholder="Digite CONFIRMAR">
+            <div class="form-group">
+                <button onclick="cancelarConfirmacaoPerigosa()" style="background: var(--text-secondary);">Cancelar</button>
+                <button onclick="executarConfirmacaoPerigosa()" style="background-color: var(--danger-color);">Confirmar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="anotacao-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 450px;">
+            <span class="emoji">📝</span>
+            <h2>Salvar Anotação</h2>
+            <p id="anotacao-trecho-preview" style="color: #333; font-style: italic; text-align: left;"></p>
+            <textarea id="anotacao-nota-input" placeholder="Sua nota sobre esse trecho (opcional)"></textarea>
+            <div class="form-group" style="margin-top: 15px;">
+                <button onclick="fecharModalAnotacao()" style="background: var(--text-secondary);">Cancelar</button>
+                <button onclick="salvarAnotacao()">Salvar</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="srs-rapido-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 450px;">
+            <span class="emoji">🧠</span>
+            <h2>Virar Card SRS</h2>
+            <input type="text" id="srs-rapido-tema" list="lista-temas-srs" placeholder="Tema (ex: Matemática::Álgebra)">
+            <input type="text" id="srs-rapido-subtema" placeholder="Pergunta">
+            <textarea id="srs-rapido-resposta" placeholder="Resposta"></textarea>
+            <div class="form-group" style="margin-top: 10px;">
+                <button type="button" class="btn-inverter-pergunta-resposta" onclick="inverterPerguntaRespostaRapido()" title="Trocar o conteúdo dos dois campos">🔄 Inverter Pergunta/Resposta</button>
+            </div>
+            <div class="form-group" style="margin-top: 10px;">
+                <button type="button" class="btn-cloze-marcar" id="btn-cloze-rapido" onclick="alternarModoClozeSRS('rapido')">🕳 Marcar lacunas</button>
+            </div>
+            <div id="srs-rapido-cloze-preview" class="cloze-preview oculto"></div>
+            <div class="form-group-imagens-srs">
+                <label class="label-imagem-srs">🖼️ Imagem na pergunta
+                    <input type="file" id="srs-rapido-imagem-pergunta" accept="image/*" onchange="selecionarImagemCard('rapido','pergunta',this)">
+                </label>
+                <span id="srs-rapido-imagem-pergunta-preview" class="imagem-srs-preview-mini oculto"></span>
+                <label class="label-imagem-srs">🖼️ Imagem na resposta
+                    <input type="file" id="srs-rapido-imagem-resposta" accept="image/*" onchange="selecionarImagemCard('rapido','resposta',this)">
+                </label>
+                <span id="srs-rapido-imagem-resposta-preview" class="imagem-srs-preview-mini oculto"></span>
+            </div>
+            <div class="form-group" style="margin-top: 15px;">
+                <button onclick="fecharModalSrsRapido()" style="background: var(--text-secondary);">Cancelar</button>
+                <button onclick="confirmarSrsRapido()">Adicionar ao Deck</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="srs-temas-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 560px; max-height: 90vh; overflow-y: auto;">
+            <h2>🗂️ Escolher Temas</h2>
+            <div class="srs-temas-acoes">
+                <button onclick="marcarTodosTemasSRS()">☑️ Marcar Tudo</button>
+                <button onclick="limparTodosTemasSRS()" style="background: var(--text-secondary);">☐ Limpar Tudo</button>
+            </div>
+            <div class="srs-arvore-container" id="srs-arvore-temas"></div>
+            <div class="form-group">
+                <button onclick="fecharModalTemasSRS()" style="background: var(--text-secondary);">Cancelar</button>
+                <button onclick="confirmarSelecaoTemasSRS()">Aplicar</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
