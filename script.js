@@ -1324,18 +1324,24 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
     const campoFrente = flds[0] || "";
     let campoVerso = flds[1] || "";
 
-    // NOVO: tipos de nota mais elaborados (ex: add-on Migaku, comum em decks de chinês) não guardam a
-    // resposta só no 2º campo — o conteúdo de verdade fica espalhado em vários campos (palavra,
-    // definição, pinyin, áudio...). Se o 2º campo vier vazio mas existem mais campos com conteúdo,
-    // junta todos eles (com o nome de cada um) como resposta, em vez de descartar a nota inteira.
-    if (!campoVerso.replace(/<\/?[^>]+>/g, "").trim() && modelo.flds && flds.length > 2) {
+    // NOVO: tipos de nota mais elaborados (ex: add-on Migaku, comum em decks de chinês) não guardam
+    // TODA a resposta só no 2º campo — o card real no Anki combina vários campos (palavra, definição,
+    // pinyin, imagem, áudio...) no verso, mesmo quando o 2º campo (aqui usado como base) também tem
+    // conteúdo. Por isso sempre juntamos os campos extras não vazios (com o nome de cada um), não só
+    // quando o 2º campo vem vazio — senão imagem/áudio desses campos extras nunca apareciam no card.
+    if (modelo.flds && flds.length > 2) {
         const nomesCampos = modelo.flds.map(f => f.name);
         const extras = [];
         for (let i = 2; i < flds.length; i++) {
-            const valorBruto = (flds[i] || "").replace(/<\/?[^>]+>/g, "").trim();
-            if (valorBruto) extras.push(`${nomesCampos[i] || ("Campo " + i)}: ${flds[i]}`);
+            const bruto = flds[i] || "";
+            // Um campo só de imagem/áudio (ex: "Screenshot" com só um <img>) não tem "texto" depois de
+            // tirar as tags, mas não pode ser descartado como vazio — senão a imagem/áudio dele some.
+            const temConteudo = bruto.replace(/<\/?[^>]+>/g, "").trim() || /<img[^>]+src=/i.test(bruto) || /\[sound:/i.test(bruto);
+            if (temConteudo) extras.push(`${nomesCampos[i] || ("Campo " + i)}: ${bruto}`);
         }
-        if (extras.length > 0) campoVerso = extras.join("<br>");
+        if (extras.length > 0) {
+            campoVerso = campoVerso.trim() ? [campoVerso, ...extras].join("<br>") : extras.join("<br>");
+        }
     }
 
     return converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaIndice);
