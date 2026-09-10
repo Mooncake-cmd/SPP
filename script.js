@@ -125,7 +125,8 @@ function hoje() { return new Date().toLocaleDateString(); }
 function hojeISO() { return new Date().toISOString().split('T')[0]; }
 
 /* === FUNÇÕES BÁSICAS E DE DANO === */
-function salvar() { localStorage.setItem("dados", JSON.stringify(dados)); atualizar(); }
+function salvarDados() { localStorage.setItem("dados", JSON.stringify(dados)); }
+function salvar() { salvarDados(); atualizar(); }
 
 function isItemAtivoHoje(item) {
     if (!item.recorrencia || item.recorrencia.tipo !== 'semanal') return true;
@@ -1422,7 +1423,15 @@ function processarRevisaoSRS(qualidade) {
     const dataObj = new Date(); dataObj.setDate(dataObj.getDate() + novoIntervalo);
     cardAtualRevisao.data_proxima_revisao = dataObj.toISOString().split('T')[0];
     dados.pontosAcumulados += 10;
-    salvar();
+
+    // NOVO: salvar() dispara atualizar(), que reconstrói o app INTEIRO (checklist, biblioteca,
+    // finanças com 2 gráficos, RPG com mais 3 gráficos, e a lista completa do deck de SRS) a cada
+    // resposta de revisão — era isso que fazia passar pro próximo card demorar vários segundos,
+    // principalmente em decks grandes importados do Anki. Aqui só persistimos os dados e atualizamos
+    // as partes da tela que realmente mudaram: o próprio card de revisão e as estatísticas do SRS.
+    salvarDados();
+    carregarRevisaoSRS();
+    atualizarEstatisticasSRS();
 }
 function removerCardSRS(id) { if(confirm("Excluir este card do deck?")) { dados.srsItems = dados.srsItems.filter(i => i.id !== id); salvar(); } }
 
@@ -1450,8 +1459,12 @@ function renderizarListaSRS() {
     const lista = document.getElementById("lista-srs-completa");
     if(!lista) return;
     if (elementoEmEdicaoDentroDe("lista-srs-completa")) return; // não reconstrói enquanto edita um card aqui
-    lista.innerHTML = "";
     dados.srsItems.sort((a,b) => a.tema.localeCompare(b.tema));
+    // NOVO: monta tudo num array e junta uma vez só no final, em vez de "lista.innerHTML += ..." a
+    // cada card — esse padrão é O(n²) (o navegador reserializa/reparseia o HTML acumulado inteiro a
+    // cada iteração), e ficava bem perceptível em decks grandes importados do Anki (centenas/milhares
+    // de cards).
+    const partesHtml = [];
     dados.srsItems.forEach(item => {
         const partesData = item.data_proxima_revisao.split('-');
         const ehCloze = item.tipo === "cloze" && item.clozePartes;
@@ -1468,8 +1481,9 @@ function renderizarListaSRS() {
             const temImagem = item.imagemPerguntaId || item.imagemRespostaId;
             corpoHtml = `<strong contenteditable="true" onblur="editarCampoSRS(${item.id}, 'subtema', this.innerText)">${escaparHtml(item.subtema)}</strong>${temImagem ? ' <span title="Este card tem imagem">🖼️</span>' : ''}<div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;" contenteditable="true" onblur="editarCampoSRS(${item.id}, 'resposta', this.innerText)">${respostaTxt}</div>`;
         }
-        lista.innerHTML += `<div class="srs-item-mini"><div style="flex:1;"><input class="srs-tag-input" list="lista-temas-srs" value="${escaparHtml(item.tema)}" onblur="editarCampoSRS(${item.id}, 'tema', this.value)"><br>${corpoHtml}</div><div style="text-align:right;"><div style="font-size:0.8em; color:var(--text-secondary); white-space:nowrap;">Rev: ${partesData[2]}/${partesData[1]}</div><button onclick="removerCardSRS(${item.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.2em;">&times;</button></div></div>`;
+        partesHtml.push(`<div class="srs-item-mini"><div style="flex:1;"><input class="srs-tag-input" list="lista-temas-srs" value="${escaparHtml(item.tema)}" onblur="editarCampoSRS(${item.id}, 'tema', this.value)"><br>${corpoHtml}</div><div style="text-align:right;"><div style="font-size:0.8em; color:var(--text-secondary); white-space:nowrap;">Rev: ${partesData[2]}/${partesData[1]}</div><button onclick="removerCardSRS(${item.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.2em;">&times;</button></div></div>`);
     });
+    lista.innerHTML = partesHtml.join("");
 }
 
 /* === BIBLIOTECA DE LIVROS (IndexedDB + PDF.js + epub.js) === */
