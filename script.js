@@ -3347,16 +3347,22 @@ function atualizarBannerVencimentoContas() {
 // na prática, "desde a última atualização").
 function registrarAtualizacaoInvestimento() {
     const valorInput = document.getElementById("financas-invest-valor");
+    const aporteInput = document.getElementById("financas-invest-aporte");
     const novoValor = parseFloat(valorInput.value);
     if (isNaN(novoValor) || novoValor < 0) { alert("Informe um valor válido."); return; }
+    const aporte = Math.max(0, parseFloat(aporteInput.value) || 0);
 
     const historico = dados.financas.investimentos.historico;
     const anterior = historico.length > 0 ? historico[historico.length - 1] : null;
-    const rendimentoValor = anterior ? novoValor - anterior.valorTotal : 0;
+    // NOVO: desconta o aporte (dinheiro que você mesmo colocou agora) do rendimento — antes esse campo
+    // existia no formulário mas nunca era lido em lugar nenhum do código, então um aporte era contado
+    // como se fosse ganho do investimento.
+    const rendimentoValor = anterior ? (novoValor - anterior.valorTotal) - aporte : 0;
     const rendimentoPercentual = anterior && anterior.valorTotal > 0 ? (rendimentoValor / anterior.valorTotal) * 100 : 0;
 
-    historico.push({ id: Date.now(), data: hojeISO(), valorTotal: novoValor, rendimentoValor: rendimentoValor, rendimentoPercentual: rendimentoPercentual });
+    historico.push({ id: Date.now(), data: hojeISO(), valorTotal: novoValor, aporte: aporte, rendimentoValor: rendimentoValor, rendimentoPercentual: rendimentoPercentual });
     valorInput.value = "";
+    aporteInput.value = "";
     salvar();
 }
 function removerUltimaAtualizacaoInvestimento() {
@@ -3376,13 +3382,21 @@ function obterResumoInvestimentos() {
     const atual = historico[historico.length - 1];
     const primeiro = historico[0];
 
-    const anterior = historico.length > 1 ? historico[historico.length - 2] : null;
-    const semanal = anterior
-        ? { valor: atual.valorTotal - anterior.valorTotal, percentual: anterior.valorTotal > 0 ? ((atual.valorTotal - anterior.valorTotal) / anterior.valorTotal) * 100 : 0 }
+    // NOVO: "esta semana" usa o rendimento já calculado (e líquido de aporte) na própria atualização
+    // mais recente, em vez de refazer a subtração crua valorTotal - valorTotal (que ignorava aporte).
+    const semanal = historico.length > 1
+        ? { valor: atual.rendimentoValor, percentual: atual.rendimentoPercentual }
         : null;
 
     const mensal = calcularCrescimentoInvestimentoNoMes(mesAtualChave()) || { rendimentoValor: 0, rendimentoPercentual: 0 };
-    const total = { valor: atual.valorTotal - primeiro.valorTotal, percentual: primeiro.valorTotal > 0 ? ((atual.valorTotal - primeiro.valorTotal) / primeiro.valorTotal) * 100 : 0 };
+
+    // NOVO: desconta do total todos os aportes feitos DEPOIS do primeiro registro — o aporte do
+    // próprio primeiro registro já está embutido no valorTotal dele (é a linha de base), então não
+    // entra nessa soma.
+    const somaAportesAposPrimeiro = historico.slice(1).reduce((soma, h) => soma + (h.aporte || 0), 0);
+    const valorTotalBruto = atual.valorTotal - primeiro.valorTotal;
+    const valorTotalLiquido = valorTotalBruto - somaAportesAposPrimeiro;
+    const total = { valor: valorTotalLiquido, percentual: primeiro.valorTotal > 0 ? (valorTotalLiquido / primeiro.valorTotal) * 100 : 0 };
 
     return {
         valorAtual: atual.valorTotal,
@@ -3402,9 +3416,18 @@ function calcularCrescimentoInvestimentoNoMes(chaveMes) {
     if (registrosDoMes.length === 0) return null;
 
     const registrosAntes = historico.filter(h => chaveMesDaData(h.data) < chaveMes);
-    const valorInicio = registrosAntes.length > 0 ? registrosAntes[registrosAntes.length - 1].valorTotal : registrosDoMes[0].valorTotal;
+    const temBaseAnterior = registrosAntes.length > 0;
+    const valorInicio = temBaseAnterior ? registrosAntes[registrosAntes.length - 1].valorTotal : registrosDoMes[0].valorTotal;
     const valorFim = registrosDoMes[registrosDoMes.length - 1].valorTotal;
-    const rendimentoValor = valorFim - valorInicio;
+
+    // NOVO: desconta os aportes feitos dentro do mês do rendimento — se já havia um registro ANTES
+    // do mês (valorInicio veio dele), todo aporte do mês é descontado; se o mês começa sem linha de
+    // base (o 1º registro do mês É o valorInicio), o aporte desse 1º registro já está embutido nele
+    // e não deve ser descontado de novo, só os aportes dos registros seguintes dentro do mês.
+    const registrosParaSomarAporte = temBaseAnterior ? registrosDoMes : registrosDoMes.slice(1);
+    const somaAportes = registrosParaSomarAporte.reduce((soma, h) => soma + (h.aporte || 0), 0);
+
+    const rendimentoValor = (valorFim - valorInicio) - somaAportes;
     const rendimentoPercentual = valorInicio > 0 ? (rendimentoValor / valorInicio) * 100 : 0;
     return { valorInicio: valorInicio, valorFim: valorFim, rendimentoValor: rendimentoValor, rendimentoPercentual: rendimentoPercentual };
 }
