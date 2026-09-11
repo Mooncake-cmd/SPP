@@ -851,3 +851,21 @@ button:hover { filter: brightness(0.9); }
     opacity: 1;
     visibility: visible;
 }
+
+/* NOVO: caixa expansível "+ Saiba mais" — reproduz o filtro {{hint:Campo}} do Anki (link colapsado por
+   padrão que revela o conteúdo ao clicar), usada em campos de hint importados de decks do Anki. */
+.srs-hint-anki {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--table-header-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+.srs-hint-anki summary {
+    cursor: pointer;
+    font-weight: bold;
+    color: var(--secondary-color);
+}
+.srs-hint-anki[open] summary {
+    margin-bottom: 6px;
+}

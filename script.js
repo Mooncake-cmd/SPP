@@ -1380,34 +1380,211 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     return Promise.all(tarefas);
 }
 
+// Mesmo teste de "tem conteúdo de verdade" usado em vários pontos do importador (campo extra do
+// fallback antigo, seções condicionais {{#Campo}}/{{^Campo}} do template novo, hint {{hint:Campo}}):
+// um campo só de imagem/áudio não sobra texto depois de tirar as tags, mas não conta como vazio.
+function campoAnkiTemConteudo(bruto) {
+    bruto = bruto || "";
+    return !!(bruto.replace(/<\/?[^>]+>/g, "").trim() || /<img[^>]+src=/i.test(bruto) || /\[sound:/i.test(bruto));
+}
+
 function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
     const ehCloze = modelo.type === 1 || /cloze/i.test(modelo.name || "");
-    if (ehCloze) return converterNotaClozeAnki(flds[0] || "", tema, zip, nomeParaIndice);
+    if (ehCloze) {
+        // NOVO: antes sempre lia o cloze do campo 0 — quebra em decks onde o campo 0 é metadado (ex:
+        // "MATÉRIA"/matéria+logo) e o texto com {{c1::...}} de verdade está em outro campo. Agora lemos
+        // do template (qfmt tem {{cloze:NomeDoCampo}}) qual campo é o de verdade; se não achar, cai no
+        // campo 0 como antes (decks onde isso já era o campo certo continuam funcionando igual).
+        const nomeCampoCloze = encontrarNomeCampoClozeAnki(modelo);
+        const nomesCampos = (modelo.flds || []).map(f => f.name);
+        const idx = nomeCampoCloze ? nomesCampos.indexOf(nomeCampoCloze) : -1;
+        return converterNotaClozeAnki(flds[idx !== -1 ? idx : 0] || "", tema, zip, nomeParaIndice);
+    }
 
+    // NOVO: em vez de assumir por posição que o campo 0 é a frente e o campo 1+ vira a resposta
+    // (heurística que quebra em decks "profissionais" com campos de metadado — matéria, assunto —
+    // antes do conteúdo de verdade, ex: baralhos do Estratégia/Esquematiza AI), usamos o template real
+    // do Anki (qfmt/afmt, que já vem no .apkg) pra montar frente e verso exatamente como o Anki monta.
+    const prep = prepararTemplateAnki(modelo);
+    if (prep) return converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaIndice);
+
+    // Fallback: só chega aqui se o deck não tiver um template legível (raro) — mantém a heurística
+    // antiga por posição de campo, melhor do que simplesmente falhar a importação.
     const campoFrente = flds[0] || "";
     let campoVerso = flds[1] || "";
-
-    // NOVO: tipos de nota mais elaborados (ex: add-on Migaku, comum em decks de chinês) não guardam
-    // TODA a resposta só no 2º campo — o card real no Anki combina vários campos (palavra, definição,
-    // pinyin, imagem, áudio...) no verso, mesmo quando o 2º campo (aqui usado como base) também tem
-    // conteúdo. Por isso sempre juntamos os campos extras não vazios (com o nome de cada um), não só
-    // quando o 2º campo vem vazio — senão imagem/áudio desses campos extras nunca apareciam no card.
     if (modelo.flds && flds.length > 2) {
         const nomesCampos = modelo.flds.map(f => f.name);
         const extras = [];
         for (let i = 2; i < flds.length; i++) {
             const bruto = flds[i] || "";
-            // Um campo só de imagem/áudio (ex: "Screenshot" com só um <img>) não tem "texto" depois de
-            // tirar as tags, mas não pode ser descartado como vazio — senão a imagem/áudio dele some.
-            const temConteudo = bruto.replace(/<\/?[^>]+>/g, "").trim() || /<img[^>]+src=/i.test(bruto) || /\[sound:/i.test(bruto);
-            if (temConteudo) extras.push(`${nomesCampos[i] || ("Campo " + i)}: ${bruto}`);
+            if (campoAnkiTemConteudo(bruto)) extras.push(`${nomesCampos[i] || ("Campo " + i)}: ${bruto}`);
         }
         if (extras.length > 0) {
             campoVerso = campoVerso.trim() ? [campoVerso, ...extras].join("<br>") : extras.join("<br>");
         }
     }
-
     return converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaIndice);
+}
+
+function encontrarNomeCampoClozeAnki(modelo) {
+    const tmpl = modelo.tmpls && modelo.tmpls[0];
+    if (!tmpl || !tmpl.qfmt) return null;
+    const m = tmpl.qfmt.match(/\{\{cloze:([^}]+)\}\}/);
+    if (!m) return null;
+    const nome = m[1].trim();
+    const nomesCampos = (modelo.flds || []).map(f => f.name);
+    return nomesCampos.includes(nome) ? nome : null;
+}
+
+// Tira do template tudo que não é conteúdo de verdade do card: o JS/CSS embutido (alguns add-ons,
+// como o Migaku, embutem vários KB de JS no template que a gente nunca executa) e mídia "de cano" —
+// escrita direto no texto do template, não vinda de nenhum campo da nota (ex: um bipe de silêncio
+// "[sound:_1sec.mp3]" embutido no afmt, comum em decks mais antigos, pra contornar bug de autoplay do
+// Anki). Sem isso, esse tipo de mídia vira um player de áudio/imagem falso em TODO card do deck — a
+// mídia de verdade (a que vem de {{NomeDoCampo}}) é sempre extraída à parte, campo por campo, então
+// nada de real se perde aqui.
+function limparTemplateAnki(template) {
+    return (template || "")
+        .replace(/<script[\s\S]*?<\/script>/gi, "")
+        .replace(/<style[\s\S]*?<\/style>/gi, "")
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/\[sound:[^\]]*\]/gi, "")
+        .replace(/<img[^>]*>/gi, "");
+}
+
+// Quais campos um template (já limpo) realmente referencia — usado pra saber em qual lado do card
+// (frente/verso) a mídia de cada campo deve aparecer (um campo só citado no afmt, ex: "Screenshot" só
+// usado na resposta, não deve colocar imagem na pergunta).
+function camposReferenciadosAnki(templateLimpo, nomesCampos) {
+    const encontrados = new Set();
+    const regex = /\{\{[#^/]?(?:[\w-]+:)?([^}]+)\}\}/g;
+    let m;
+    while ((m = regex.exec(templateLimpo)) !== null) {
+        const nome = m[1].trim();
+        if (nomesCampos.includes(nome)) encontrados.add(nome);
+    }
+    return encontrados;
+}
+
+// Prepara (e cacheia no próprio objeto do modelo, evitando reprocessar o mesmo template gigante a
+// cada nota) os dados fixos do template de um tipo de nota: qfmt/afmt já limpos e quais campos cada
+// lado referencia. Retorna null se o deck não tiver um template legível (cai no fallback por posição).
+function prepararTemplateAnki(modelo) {
+    if (modelo.__templateAnkiPreparado !== undefined) return modelo.__templateAnkiPreparado;
+    const tmpl = modelo.tmpls && modelo.tmpls[0];
+    const nomesCampos = (modelo.flds || []).map(f => f.name);
+    let preparado = null;
+    if (tmpl && tmpl.qfmt && nomesCampos.length > 0) {
+        const qfmt = limparTemplateAnki(tmpl.qfmt);
+        const afmt = limparTemplateAnki(tmpl.afmt || "");
+        preparado = { qfmt, afmt, camposFrente: camposReferenciadosAnki(qfmt, nomesCampos), camposVerso: camposReferenciadosAnki(afmt, nomesCampos) };
+    }
+    modelo.__templateAnkiPreparado = preparado;
+    return preparado;
+}
+
+// Interpreta o mini-formato de template do Anki (mustache-like): {{Campo}}/{{modificador:Campo}} viram
+// o texto já processado do campo; {{#Campo}}...{{/Campo}} e {{^Campo}}...{{/Campo}} são seções
+// condicionais (mostra se o campo tem/não tem conteúdo); {{FrontSide}} vira vazio (a frente já é
+// exibida separada pelo app, repeti-la na resposta seria redundante); {{hint:Campo}} vira um
+// placeholder que vira uma caixa expansível de verdade depois (ver resolverHintsAnki).
+function renderizarTemplateAnki(templateLimpo, campos, hintsColetados) {
+    let resultado = templateLimpo.replace(/\{\{FrontSide\}\}/g, "");
+
+    // Repete a resolução de seções algumas vezes: templates mais elaborados (o do add-on Migaku, por
+    // exemplo) aninham seção dentro de seção ("Is Audio Card" dentro de "Is Vocabulary Card") — uma
+    // passada só não dá conta de resolver a de dentro.
+    for (let i = 0; i < 5; i++) {
+        const antes = resultado;
+        resultado = resultado.replace(/\{\{#([^}]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (m, nome, conteudo) => {
+            const c = campos[nome.trim()];
+            return c && campoAnkiTemConteudo(c.raw) ? conteudo : "";
+        });
+        resultado = resultado.replace(/\{\{\^([^}]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (m, nome, conteudo) => {
+            const c = campos[nome.trim()];
+            return c && campoAnkiTemConteudo(c.raw) ? "" : conteudo;
+        });
+        if (resultado === antes) break;
+    }
+
+    resultado = resultado.replace(/\{\{hint:([^}]+)\}\}/g, (m, nomeCampo) => {
+        const c = campos[nomeCampo.trim()];
+        if (!c || !c.texto || !c.texto.trim()) return "";
+        const idx = hintsColetados.length;
+        hintsColetados.push({ nome: nomeCampo.trim(), texto: c.texto });
+        return `${MARCA_INICIO_HINT_ANKI}HINT${idx}${MARCA_FIM_HINT_ANKI}`;
+    });
+
+    resultado = resultado.replace(/\{\{(?:[\w-]+:)?([^}]+)\}\}/g, (m, nomeCampo) => {
+        const nome = nomeCampo.trim();
+        if (nome === "Tags" || nome === "Type" || nome === "Deck" || nome === "Subdeck" || nome === "Card") return "";
+        const c = campos[nome];
+        return c ? c.texto : "";
+    });
+
+    return resultado;
+}
+
+// Troca os placeholders de {{hint:Campo}} (já resolvidos por renderizarTemplateAnki pra um token
+// simples) pela caixa expansível de verdade — feito DEPOIS que o HTML do template ao redor já virou
+// texto puro (ver converterHtmlParaTextoPlanoProtegido), senão a tag <details> seria destruída junto
+// com o resto do HTML do template.
+function resolverHintsAnki(html, hints) {
+    let resultado = html;
+    hints.forEach((hint, idx) => {
+        const token = `${MARCA_INICIO_HINT_ANKI}HINT${idx}${MARCA_FIM_HINT_ANKI}`;
+        // Tira símbolo decorativo comum no início do nome do campo (ex: "✚ Saiba mais") — o ➕ do
+        // resumo já indica visualmente que é expansível, não precisa repetir.
+        const nomeLimpo = hint.nome.replace(/^[✚+*]\s*/, "");
+        const bloco = `${MARCA_INICIO_HINT_ANKI}<details class="srs-hint-anki"><summary>➕ ${escaparHtml(nomeLimpo)}</summary>${hint.texto}</details>${MARCA_FIM_HINT_ANKI}`;
+        resultado = resultado.split(token).join(bloco);
+    });
+    return resultado;
+}
+
+function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaIndice) {
+    const nomesCampos = (modelo.flds || []).map(f => f.name);
+    // Extrai mídia/texto de CADA CAMPO isoladamente primeiro (exatamente como já fazíamos pra decks
+    // "simples") — só depois eles entram no template. Assim, mídia de verdade (a que vem de um campo
+    // da nota) nunca se confunde com mídia "de cano" do próprio template, que já foi removida em
+    // limparTemplateAnki.
+    return Promise.all(nomesCampos.map((nome, i) => {
+        const raw = flds[i] || "";
+        return extrairMidiaDoCampo(raw, zip, nomeParaIndice).then(r => ({ nome, raw, ...r }));
+    })).then(resultadosPorCampo => {
+        const campos = {};
+        resultadosPorCampo.forEach(r => { campos[r.nome] = r; });
+
+        const hintsFrente = [], hintsVerso = [];
+        let frenteHtml = renderizarTemplateAnki(prep.qfmt, campos, hintsFrente);
+        let versoHtml = renderizarTemplateAnki(prep.afmt, campos, hintsVerso);
+        frenteHtml = converterHtmlParaTextoPlanoProtegido(frenteHtml);
+        versoHtml = converterHtmlParaTextoPlanoProtegido(versoHtml);
+        frenteHtml = resolverHintsAnki(frenteHtml, hintsFrente);
+        versoHtml = resolverHintsAnki(versoHtml, hintsVerso);
+
+        const imagensFrente = [], midiasFrente = [], imagensVerso = [], midiasVerso = [];
+        let midiaNaoSuportada = false;
+        resultadosPorCampo.forEach(r => {
+            if (prep.camposFrente.has(r.nome)) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); }
+            if (prep.camposVerso.has(r.nome)) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); }
+            if (r.midiaNaoSuportada) midiaNaoSuportada = true;
+        });
+
+        const frenteVazia = !frenteHtml.trim() && imagensFrente.length === 0 && midiasFrente.length === 0;
+        const versoVazio = !versoHtml.trim() && imagensVerso.length === 0 && midiasVerso.length === 0;
+        if (frenteVazia || versoVazio) throw new Error(`Frente ou Verso sem nenhum conteúdo depois de renderizar o template do Anki (modelo "${modelo.name || "sem nome"}"). Frente: "${frenteHtml.slice(0, 60)}" | Verso: "${versoHtml.slice(0, 60)}"`);
+
+        const card = {
+            id: Date.now() + Math.floor(Math.random() * 1000000),
+            tema: tema, subtema: frenteHtml, resposta: versoHtml, tipo: "normal",
+            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
+        };
+        aplicarMidiasExtraidasNoCard(card, "Pergunta", { imagens: imagensFrente, midias: midiasFrente });
+        aplicarMidiasExtraidasNoCard(card, "Resposta", { imagens: imagensVerso, midias: midiasVerso });
+        card._midiaNaoSuportada = midiaNaoSuportada;
+        return card;
+    });
 }
 
 // Um lado do card só é considerado "vazio de verdade" se não tiver NEM texto NEM imagem/mídia —
@@ -1491,7 +1668,14 @@ function converterHtmlParaTextoPlano(html) {
         .replace(/<\/(div|p|li|tr|h[1-6])>/gi, "\n");
     const div = document.createElement("div");
     div.innerHTML = comQuebras;
-    return (div.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
+    // NOVO: além de colapsar linhas em branco em excesso, tira espaço/tab sobrando no início/fim de
+    // CADA linha e colapsa espaços internos repetidos — templates com HTML bem aninhado (vários <div>
+    // um dentro do outro, cada um virando quebra de linha) deixavam bastante linha "quase vazia" (só
+    // espaço) entre o conteúdo de verdade.
+    return (div.textContent || "")
+        .split("\n").map(l => l.replace(/[ \t]+/g, " ").trim()).join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
 }
 
 // NOVO: extrai TODAS as imagens e TODOS os áudios/vídeos de um campo (antes só pegava o 1º de cada
@@ -1582,10 +1766,37 @@ function decodificarSilabaPinyin(silaba) {
     return silaba;
 }
 // Marcadores invisíveis (caracteres da área de uso privado do Unicode — nunca aparecem em texto real)
-// usados pra "proteger" o HTML do hover de pinyin durante o escape do resto do texto (ver
-// escaparComPinyinHover). Sem isso, o <span> viraria texto cru quando a resposta fosse exibida.
+// usados pra "proteger" HTML gerado por nós mesmo (seguro) durante o escape do resto do texto (ver
+// escaparComHtmlProtegido). Sem isso, esse HTML viraria texto cru quando a resposta fosse exibida.
+// Dois pares distintos (um pro hover de pinyin, outro pra caixa expansível "+ Saiba mais" do Anki, ver
+// resolverHintsAnki) — assim um consegue aparecer ANINHADO dentro do outro (ex: um hint com pinyin lá
+// dentro) sem os marcadores de um se confundirem com os do outro.
 const MARCA_INICIO_PINYIN_HOVER = "";
 const MARCA_FIM_PINYIN_HOVER = "";
+const MARCA_INICIO_HINT_ANKI = "";
+const MARCA_FIM_HINT_ANKI = "";
+
+// Aplica `transformar` só nos trechos do texto que NÃO estão protegidos (fora de qualquer marcador
+// acima) — usado tanto pra escapar (escaparComHtmlProtegido) quanto pra converter o resto do template
+// em texto puro (converterHtmlParaTextoPlanoProtegido), sem tocar no HTML seguro já gerado.
+function aplicarForaDosBlocosProtegidos(texto, transformar) {
+    const bruto = texto == null ? "" : String(texto);
+    if (bruto.indexOf(MARCA_INICIO_PINYIN_HOVER) === -1 && bruto.indexOf(MARCA_INICIO_HINT_ANKI) === -1) return transformar(bruto);
+    const regex = new RegExp(
+        `(${MARCA_INICIO_PINYIN_HOVER}[\\s\\S]*?${MARCA_FIM_PINYIN_HOVER}|${MARCA_INICIO_HINT_ANKI}[\\s\\S]*?${MARCA_FIM_HINT_ANKI})`, "g"
+    );
+    return bruto.split(regex).map(parte =>
+        (parte.startsWith(MARCA_INICIO_PINYIN_HOVER) || parte.startsWith(MARCA_INICIO_HINT_ANKI)) ? parte : transformar(parte)
+    ).join("");
+}
+
+// Mesma ideia de converterHtmlParaTextoPlano, mas preservando trechos já protegidos (spans de hover de
+// pinyin ou tokens de hint ainda não resolvidos) — usada ao montar frente/verso a partir do template do
+// Anki, que pode ter campos já processados (com HTML seguro embutido) misturados com o HTML "cru" do
+// próprio template.
+function converterHtmlParaTextoPlanoProtegido(html) {
+    return aplicarForaDosBlocosProtegidos(html, converterHtmlParaTextoPlano);
+}
 
 function escaparAtributoHtml(texto) {
     return escaparHtml(texto).replace(/"/g, "&quot;");
@@ -1644,8 +1855,8 @@ function carregarRevisaoSRS() {
     } else {
         cardAtualRevisao = paraRevisar[0];
         const ehCloze = cardAtualRevisao.tipo === "cloze" && cardAtualRevisao.clozePartes;
-        const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) : escaparComPinyinHover(cardAtualRevisao.subtema);
-               const blocoResposta = ehCloze ? "" : `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${cardAtualRevisao.resposta ? escaparComPinyinHover(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'}</div>`;
+        const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) : escaparComHtmlProtegido(cardAtualRevisao.subtema);
+               const blocoResposta = ehCloze ? "" : `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${cardAtualRevisao.resposta ? escaparComHtmlProtegido(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'}</div>`;
         areaDisplay.innerHTML = `<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(cardAtualRevisao.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${cardAtualRevisao.intervalo_atual} dias</div>`;;
         controls.classList.add("oculto");
         if (btnRevelar) btnRevelar.classList.remove("oculto");
@@ -1745,11 +1956,11 @@ function renderizarListaSRS() {
                 const texto = obterTextoSegmentoCloze(seg);
                 fraseHtml += seg.lacuna ? `<span class="cloze-palavra-lista">${escaparHtml(texto)}</span>` : escaparHtml(texto);
             });
-            corpoHtml = `<strong>🕳 ${fraseHtml}</strong><div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;">Resposta: ${escaparHtml(item.resposta)} <button class="btn-editar-cloze" onclick="carregarCardParaEdicao(${item.id})" title="Editar lacunas">✏️ Editar</button></div>`;
+            corpoHtml = `<strong>🕳 ${fraseHtml}</strong><div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;">Resposta: ${escaparComHtmlProtegido(item.resposta)} <button class="btn-editar-cloze" onclick="carregarCardParaEdicao(${item.id})" title="Editar lacunas">✏️ Editar</button></div>`;
         } else {
-            const respostaTxt = item.resposta ? escaparComPinyinHover(item.resposta) : '(sem resposta — clique para adicionar)';
+            const respostaTxt = item.resposta ? escaparComHtmlProtegido(item.resposta) : '(sem resposta — clique para adicionar)';
             const temImagem = item.imagemPerguntaId || item.imagemRespostaId;
-            corpoHtml = `<strong contenteditable="true" onblur="editarCampoSRS(${item.id}, 'subtema', this.innerText)">${escaparComPinyinHover(item.subtema)}</strong>${temImagem ? ' <span title="Este card tem imagem">🖼️</span>' : ''}<div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;" contenteditable="true" onblur="editarCampoSRS(${item.id}, 'resposta', this.innerText)">${respostaTxt}</div>`;
+            corpoHtml = `<strong contenteditable="true" onblur="editarCampoSRS(${item.id}, 'subtema', this.innerText)">${escaparComHtmlProtegido(item.subtema)}</strong>${temImagem ? ' <span title="Este card tem imagem">🖼️</span>' : ''}<div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;" contenteditable="true" onblur="editarCampoSRS(${item.id}, 'resposta', this.innerText)">${respostaTxt}</div>`;
         }
         partesHtml.push(`<div class="srs-item-mini"><div style="flex:1;"><input class="srs-tag-input" list="lista-temas-srs" value="${escaparHtml(item.tema)}" onblur="editarCampoSRS(${item.id}, 'tema', this.value)"><br>${corpoHtml}</div><div style="text-align:right;"><div style="font-size:0.8em; color:var(--text-secondary); white-space:nowrap;">Rev: ${partesData[2]}/${partesData[1]}</div><button onclick="removerCardSRS(${item.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.2em;">&times;</button></div></div>`);
     });
@@ -2234,17 +2445,12 @@ function escaparHtmlComQuebras(texto) {
     return escaparHtml(texto).replace(/\n/g, "<br>");
 }
 
-// Mesma ideia de escaparHtmlComQuebras, mas preservando os spans de hover de pinyin que
-// converterAnotacoesPinyin() já deixou prontos e "protegidos" com os marcadores MARCA_INICIO/FIM —
-// escapa normalmente o texto ao redor, sem tocar no HTML seguro que a gente mesmo gerou.
-function escaparComPinyinHover(texto) {
+// Mesma ideia de escaparHtmlComQuebras, mas preservando os trechos já "protegidos" (spans de hover de
+// pinyin, caixas expansíveis de hint do Anki) — escapa normalmente o texto ao redor, sem tocar no HTML
+// seguro que a gente mesmo gerou.
+function escaparComHtmlProtegido(texto) {
     const bruto = texto == null ? "" : String(texto);
-    if (bruto.indexOf(MARCA_INICIO_PINYIN_HOVER) === -1) return escaparHtmlComQuebras(bruto);
-    const regexSpan = new RegExp(`${MARCA_INICIO_PINYIN_HOVER}([\\s\\S]*?)${MARCA_FIM_PINYIN_HOVER}`, "g");
-    const partes = bruto.split(regexSpan);
-    // Depois do split, os índices ímpares são o conteúdo capturado (o <span> pronto, sem os marcadores);
-    // os pares são texto comum ao redor, que precisa ser escapado normalmente.
-    return partes.map((parte, idx) => idx % 2 === 1 ? parte : escaparHtml(parte)).join("").replace(/\n/g, "<br>");
+    return aplicarForaDosBlocosProtegidos(bruto, escaparHtml).replace(/\n/g, "<br>");
 }
 
 // Evita que uma reconstrução de innerHTML disparada por um salvar() de OUTRA parte do app (ex: uma
