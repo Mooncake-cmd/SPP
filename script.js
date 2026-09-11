@@ -3550,6 +3550,15 @@ function atualizarBannerVencimentoContas() {
 // Cada atualização registra o VALOR TOTAL guardado naquele momento; o rendimento é sempre calculado
 // em relação ao registro anterior (por isso a cadência esperada é semanal — "toda semana" vira,
 // na prática, "desde a última atualização").
+// Garante que a categoria exista na lista (cria se ainda não tiver) e devolve o nome dela — usado pro
+// lançamento automático do aporte, que precisa de uma categoria pra aparecer nos gráficos/orçamento.
+function garantirCategoriaFinancas(nome) {
+    if (!dados.financas.categorias.some(c => c.toLowerCase() === nome.toLowerCase())) {
+        dados.financas.categorias.push(nome);
+    }
+    return nome;
+}
+
 function registrarAtualizacaoInvestimento() {
     const valorInput = document.getElementById("financas-invest-valor");
     const aporteInput = document.getElementById("financas-invest-aporte");
@@ -3565,15 +3574,33 @@ function registrarAtualizacaoInvestimento() {
     const rendimentoValor = anterior ? (novoValor - anterior.valorTotal) - aporte : 0;
     const rendimentoPercentual = anterior && anterior.valorTotal > 0 ? (rendimentoValor / anterior.valorTotal) * 100 : 0;
 
-    historico.push({ id: Date.now(), data: hojeISO(), valorTotal: novoValor, aporte: aporte, rendimentoValor: rendimentoValor, rendimentoPercentual: rendimentoPercentual });
+    const registro = { id: Date.now(), data: hojeISO(), valorTotal: novoValor, aporte: aporte, rendimentoValor: rendimentoValor, rendimentoPercentual: rendimentoPercentual };
+
+    // NOVO: um aporte é dinheiro saindo do seu saldo disponível pra virar investimento — antes isso não
+    // gerava nenhum lançamento, então o valor aportado continuava "contando" no saldo geral como se
+    // ainda pudesse ser gasto com outra coisa. Agora todo aporte cria uma saída correspondente,
+    // vinculada a esse registro do histórico (pra poder desfazer os dois juntos, ver abaixo).
+    if (aporte > 0) {
+        const categoria = garantirCategoriaFinancas("Investimentos");
+        const lancamento = { id: Date.now() + 1, data: hojeISO(), tipo: "saida", categoria: categoria, valor: aporte, descricao: "Aporte em investimentos" };
+        dados.financas.lancamentos.unshift(lancamento);
+        registro.lancamentoId = lancamento.id;
+        verificarOrcamentosEstourados();
+    }
+
+    historico.push(registro);
     valorInput.value = "";
     aporteInput.value = "";
     salvar();
 }
 function removerUltimaAtualizacaoInvestimento() {
-    if (dados.financas.investimentos.historico.length === 0) return;
-    if (!confirm("Remover a última atualização de investimento registrada?")) return;
-    dados.financas.investimentos.historico.pop();
+    const historico = dados.financas.investimentos.historico;
+    if (historico.length === 0) return;
+    if (!confirm("Remover a última atualização de investimento registrada? Se ela tiver um aporte vinculado, a saída correspondente no saldo também será removida.")) return;
+    const registro = historico.pop();
+    if (registro.lancamentoId) {
+        dados.financas.lancamentos = dados.financas.lancamentos.filter(l => l.id !== registro.lancamentoId);
+    }
     salvar();
 }
 

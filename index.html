@@ -13,23 +13,23 @@
 </head>
 <body>
 
+    <nav class="sidebar-nav" id="sidebar-nav">
+        <button class="tab-btn active" onclick="abrirAba(event, 'aba-rpg')">🎮 RPG de Vida</button>
+        <button class="tab-btn" onclick="abrirAba(event, 'aba-timer')">⏱️ Foco (Pomodoro)</button>
+        <button class="tab-btn" onclick="abrirAba(event, 'aba-objetivos')">🚀 Objetivos & Futuro</button>
+        <button class="tab-btn" onclick="abrirAba(event, 'aba-srs')">🧠 Revisão Inteligente</button>
+        <button class="tab-btn" onclick="abrirAba(event, 'aba-biblioteca')">📚 Biblioteca</button>
+        <button class="tab-btn" onclick="abrirAba(event, 'aba-financas')">💰 Finanças</button>
+    </nav>
+
     <main class="container">
-        
+
         <div class="header-top">
             <h1>Sistema de Progresso Pessoal</h1>
             <button onclick="alternarTema()" id="btn-tema" class="btn-tema" title="Alternar Tema">🌙</button>
         </div>
-       
-        <p id="data" class="data-atual"></p>
 
-        <div class="tab-nav">
-            <button class="tab-btn active" onclick="abrirAba(event, 'aba-rpg')">🎮 RPG de Vida</button>
-            <button class="tab-btn" onclick="abrirAba(event, 'aba-timer')">⏱️ Foco (Pomodoro)</button>
-            <button class="tab-btn" onclick="abrirAba(event, 'aba-objetivos')">🚀 Objetivos & Futuro</button>
-            <button class="tab-btn" onclick="abrirAba(event, 'aba-srs')">🧠 Revisão Inteligente</button>
-            <button class="tab-btn" onclick="abrirAba(event, 'aba-biblioteca')">📚 Biblioteca</button>
-            <button class="tab-btn" onclick="abrirAba(event, 'aba-financas')">💰 Finanças</button>
-        </div>
+        <p id="data" class="data-atual"></p>
 
         <div id="aba-rpg" class="tab-content active">
             <section class="status card">
