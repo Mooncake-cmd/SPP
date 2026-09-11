@@ -12,6 +12,8 @@ var dados = dadosBrutos ? JSON.parse(dadosBrutos) : {
     objetivos: [], 
     historicoConquistas: [],
     srsItems: [],
+    srsRevisoesLog: [],
+    srsLimiteNovosPorDia: 20,
     biblioteca: [],
     historicoDiario: [],
     streakAtual: 0,
@@ -36,6 +38,8 @@ if (!dados.historicoConquistas) dados.historicoConquistas = [];
 if (!dados.srsItems) dados.srsItems = [];
 dados.srsItems.forEach(i => { if (i.resposta === undefined) i.resposta = ""; }); // compatibilidade com cards antigos
 dados.srsItems.forEach(i => { if (!i.tipo) i.tipo = "normal"; }); // compatibilidade com cards antigos (antes do modo Cloze)
+if (!dados.srsRevisoesLog) dados.srsRevisoesLog = []; // histórico de cada revisão (card, data, nota) — base pra otimizar um algoritmo mais sofisticado (ex: FSRS) no futuro
+if (dados.srsLimiteNovosPorDia === undefined) dados.srsLimiteNovosPorDia = 20; // limite de cards NUNCA revisados (intervalo_atual === 0) introduzidos por dia
 if (!dados.biblioteca) dados.biblioteca = [];
 dados.biblioteca.forEach(l => { if (!l.tipo) l.tipo = 'pdf'; }); // compatibilidade com livros salvos antes do suporte a EPUB
 dados.biblioteca.forEach(l => { if (l.prateleira === undefined) l.prateleira = ""; }); // compatibilidade com livros salvos antes das prateleiras
@@ -255,10 +259,10 @@ function confirmarGameOver() {
         const dadosNovos = {
             itens: missoesPreservadas,
             recompensas: [], historicoEstudos: [], materias: [], objetivos: [],
-            historicoConquistas: [], srsItems: [], biblioteca: [],
+            historicoConquistas: [], srsItems: [], srsRevisoesLog: [], biblioteca: [],
             historicoDiario: [], streakAtual: 0, streakRecorde: 0,
             configTimer: { som: 'sino', notificacao: false, mostrarPrevisao: true },
-            tema: dados.tema, progressoGlobal: {}, metasGlobais: { mes: 50, ano: 500 },
+            tema: dados.tema, srsLimiteNovosPorDia: dados.srsLimiteNovosPorDia, progressoGlobal: {}, metasGlobais: { mes: 50, ano: 500 },
             ultimaData: "", pontosAcumulados: 0, hp: 300, maxHp: 300, maestriaAcumulada: {}
         };
         localStorage.setItem("dados", JSON.stringify(dadosNovos));
@@ -464,6 +468,8 @@ function salvarPreferenciasTimer() { dados.configTimer = { som: document.getElem
 function carregarPreferenciasTimer() {
     if (dados.configTimer) { document.getElementById("select-som").value = dados.configTimer.som || 'sino'; document.getElementById("check-notificacao").checked = dados.configTimer.notificacao || false; document.getElementById("check-previsao").checked = dados.configTimer.mostrarPrevisao !== false; }
     if (dados.metasGlobais) { document.getElementById("meta-horas-mes").value = dados.metasGlobais.mes || 50; document.getElementById("meta-horas-ano").value = dados.metasGlobais.ano || 500; }
+    const limiteNovosEl = document.getElementById("srs-limite-novos");
+    if (limiteNovosEl) limiteNovosEl.value = dados.srsLimiteNovosPorDia ?? 20;
 }
 function salvarMetasGlobais() { dados.metasGlobais = { mes: parseInt(document.getElementById("meta-horas-mes").value) || 50, ano: parseInt(document.getElementById("meta-horas-ano").value) || 500 }; salvar(); }
 function tocarSom() { const somId = dados.configTimer.som || 'sino'; const som = new Audio(AUDIOS[somId] || AUDIOS['sino']); som.play().catch(e => console.log("Som bloqueado pelo navegador")); }
@@ -1834,7 +1840,20 @@ function carregarRevisaoSRS() {
 
     const hojeData = hojeISO();
     const filtroParcial = srsTemasSelecionados.size < srsTemasConhecidos.size;
-    let paraRevisar = dados.srsItems.filter(item => item.data_proxima_revisao <= hojeData && srsTemasSelecionados.has(item.tema));
+    const elegiveis = dados.srsItems.filter(item => item.data_proxima_revisao <= hojeData && srsTemasSelecionados.has(item.tema));
+
+    // NOVO: limite diário de cards NUNCA revisados (intervalo_atual === 0 — nenhuma revisão ainda passou
+    // por eles) — sem isso, importar um deck grande (ex: 750 cards) jogava tudo de uma vez na fila do
+    // mesmo dia. Cards que já tiveram pelo menos 1 revisão (intervalo_atual > 0) nunca são barrados por
+    // esse limite, só os novos.
+    let vagasNovosHoje = Math.max(0, (dados.srsLimiteNovosPorDia ?? 20) - contarNovosEstudadosHoje());
+    let novosBarradosHoje = 0;
+    let paraRevisar = elegiveis.filter(item => {
+        if (item.intervalo_atual !== 0) return true;
+        if (vagasNovosHoje > 0) { vagasNovosHoje--; return true; }
+        novosBarradosHoje++;
+        return false;
+    });
 
     // Evita reconstruir o card que já está em revisão (perdendo a resposta revelada ou as lacunas
     // já digitadas) quando um salvar() de OUTRA parte do app — ex: uma sessão de Pomodoro terminando
@@ -1847,7 +1866,10 @@ function carregarRevisaoSRS() {
     respostaRevelada = false;
 
     if(paraRevisar.length === 0) {
-        areaDisplay.innerHTML = `<h3>🎉 Tudo em dia!</h3><p>Você revisou todos os cards${filtroParcial ? " dos temas selecionados" : ""} por hoje.</p>`;
+        const avisoNovosBarrados = novosBarradosHoje > 0
+            ? `<p style="color: var(--text-secondary); font-size: 0.9em;">Mais ${novosBarradosHoje} card(s) novo(s) esperando — o limite de novos por hoje já foi atingido. Volte amanhã ou aumente o limite em "Novos/dia".</p>`
+            : "";
+        areaDisplay.innerHTML = `<h3>🎉 Tudo em dia!</h3><p>Você revisou todos os cards${filtroParcial ? " dos temas selecionados" : ""} por hoje.</p>${avisoNovosBarrados}`;
         controls.classList.add("oculto");
         if (btnRevelar) btnRevelar.classList.add("oculto");
         feedback.innerText = "";
@@ -1888,15 +1910,34 @@ function revelarRespostaSRS() {
 
 function processarRevisaoSRS(qualidade) {
     if(!cardAtualRevisao) return;
+    const intervaloAnterior = cardAtualRevisao.intervalo_atual;
+    const fatorAnterior = cardAtualRevisao.fator_facilidade;
+
     let novoIntervalo = 0;
     if (qualidade === 'dificil') novoIntervalo = 1;
     else if (qualidade === 'bom') novoIntervalo = (cardAtualRevisao.intervalo_atual === 0) ? 1 : Math.ceil(cardAtualRevisao.intervalo_atual * cardAtualRevisao.fator_facilidade);
     else if (qualidade === 'facil') { novoIntervalo = (cardAtualRevisao.intervalo_atual === 0) ? 4 : Math.ceil(cardAtualRevisao.intervalo_atual * cardAtualRevisao.fator_facilidade * 1.3); cardAtualRevisao.fator_facilidade += 0.15; }
-    
+
     cardAtualRevisao.intervalo_atual = novoIntervalo;
     const dataObj = new Date(); dataObj.setDate(dataObj.getDate() + novoIntervalo);
     cardAtualRevisao.data_proxima_revisao = dataObj.toISOString().split('T')[0];
     dados.pontosAcumulados += 10;
+
+    // NOVO: registra cada revisão (não só o estado atual do card, que a linha acima já sobrescreve) —
+    // é a base de dados necessária pra, no futuro, calibrar um algoritmo de agendamento mais sofisticado
+    // (ex: FSRS) com o histórico real de acerto/erro, em vez de só os pesos padrão genéricos. Também é
+    // o que permite saber quantos cards NOVOS (intervalo_anterior === 0) já foram estudados hoje, pro
+    // limite diário de cards novos (ver contarNovosEstudadosHoje).
+    dados.srsRevisoesLog.push({
+        cardId: cardAtualRevisao.id,
+        data: hojeISO(),
+        dataHora: new Date().toISOString(),
+        qualidade: qualidade,
+        intervalo_anterior: intervaloAnterior,
+        intervalo_novo: novoIntervalo,
+        fator_facilidade_anterior: fatorAnterior,
+        fator_facilidade_novo: cardAtualRevisao.fator_facilidade
+    });
 
     // NOVO: salvar() dispara atualizar(), que reconstrói o app INTEIRO (checklist, biblioteca,
     // finanças com 2 gráficos, RPG com mais 3 gráficos, e a lista completa do deck de SRS) a cada
@@ -1906,6 +1947,13 @@ function processarRevisaoSRS(qualidade) {
     salvarDados();
     carregarRevisaoSRS();
     atualizarEstatisticasSRS();
+}
+
+// Quantos cards NUNCA revisados antes (intervalo_anterior === 0 no log) já foram estudados hoje —
+// usado pelo limite diário de cards novos (ver carregarRevisaoSRS).
+function contarNovosEstudadosHoje() {
+    const hojeData = hojeISO();
+    return dados.srsRevisoesLog.filter(r => r.data === hojeData && r.intervalo_anterior === 0).length;
 }
 function removerCardSRS(id) {
     if (!confirm("Excluir este card do deck?")) return;
@@ -1933,7 +1981,15 @@ function atualizarEstatisticasSRS() {
     const hojeData = hojeISO();
     const paraHoje = dados.srsItems.filter(i => i.data_proxima_revisao <= hojeData).length;
     const dominados = dados.srsItems.filter(i => i.intervalo_atual > 30).length;
-    el.innerText = `${total} card(s) no total · ${paraHoje} para revisar hoje · ${dominados} dominado(s) (intervalo > 30 dias)`;
+    const novosHoje = contarNovosEstudadosHoje();
+    const limiteNovos = dados.srsLimiteNovosPorDia ?? 20;
+    el.innerText = `${total} card(s) no total · ${paraHoje} para revisar hoje · ${dominados} dominado(s) (intervalo > 30 dias) · ${novosHoje}/${limiteNovos} novo(s) hoje`;
+}
+
+function atualizarLimiteNovosSRS(valor) {
+    const n = parseInt(valor, 10);
+    dados.srsLimiteNovosPorDia = (isNaN(n) || n < 0) ? 0 : n;
+    salvar(); // salvar() já dispara atualizar() -> carregarRevisaoSRS()/atualizarEstatisticasSRS() com o novo limite
 }
 
 function renderizarListaSRS() {

@@ -310,8 +310,12 @@
             <section class="card" id="srs-area-revisao">
                 <h2>Revisão Diária</h2>
 
-                <div class="form-group" style="margin-bottom: 15px;">
+                <div class="form-group" style="margin-bottom: 15px; align-items: center;">
                     <button id="btn-escolher-temas-srs" class="btn-escolher-temas" onclick="abrirModalTemasSRS()">🗂️ Todos os temas</button>
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: var(--text-secondary); flex: none;" title="Máximo de cards NUNCA revisados introduzidos por dia. Cards já em revisão não entram nesse limite.">
+                        🆕 Novos/dia
+                        <input type="number" id="srs-limite-novos" class="input-mini" min="0" value="20" onchange="atualizarLimiteNovosSRS(this.value)">
+                    </label>
                 </div>
                 
                 <div id="srs-card-display" class="srs-card-container">
