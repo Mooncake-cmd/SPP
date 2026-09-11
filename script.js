@@ -1093,11 +1093,21 @@ function excluirTema(caminho) {
     pedirConfirmacaoPerigosa(
         `Excluir o tema "${node.nome}" e todos os ${cardsAlvo.length} card(s) dele (incluindo subtemas)? Essa ação não pode ser desfeita.`,
         () => {
-            Promise.all(cardsAlvo.map(excluirMidiasDoCardSRS)).finally(() => {
+            mostrarProgressoOperacao("Excluindo tema e cards...", "🗑️");
+            const total = cardsAlvo.length;
+            let excluidos = 0;
+            atualizarProgressoOperacao(0, total, "🗑️", "Excluindo cards...");
+            Promise.all(cardsAlvo.map(card =>
+                excluirMidiasDoCardSRS(card).finally(() => {
+                    excluidos++;
+                    atualizarProgressoOperacao(excluidos, total, "🗑️", "Excluindo cards...");
+                })
+            )).finally(() => {
                 const idsParaExcluir = new Set(cardsAlvo.map(c => c.id));
                 dados.srsItems = dados.srsItems.filter(i => !idsParaExcluir.has(i.id));
                 srsNosExpandidos.delete(caminho);
                 salvar();
+                esconderProgressoOperacao();
                 alert(`Tema excluído: ${cardsAlvo.length} card(s) removido(s).`);
             });
         }
@@ -1192,9 +1202,38 @@ function carregarSqlJs() {
         .then(SQL => { sqlJsInstancia = SQL; return SQL; });
 }
 
-function mostrarModalImportandoAnki(mostrar) {
-    const modal = document.getElementById("importando-anki-modal");
-    if (modal) modal.classList.toggle("modal-oculto", !mostrar);
+// ============================================================
+// === BARRA DE PROGRESSO GENÉRICA (importação Anki, exclusão de tema, backup com arquivos) ===
+// ============================================================
+// Modal + barra de progresso compartilhados pelas 3 operações demoradas do app. Também reflete o
+// progresso no título da aba (mesma ideia do timer pomodoro, que já faz isso) pra dar pra acompanhar
+// mesmo com a aba em segundo plano.
+let tituloAbaAntesDoProgresso = null;
+function mostrarProgressoOperacao(tituloModal, emoji) {
+    if (tituloAbaAntesDoProgresso === null) tituloAbaAntesDoProgresso = document.title;
+    const modal = document.getElementById("progresso-operacao-modal");
+    if (!modal) return;
+    document.getElementById("progresso-operacao-emoji").innerText = emoji;
+    document.getElementById("progresso-operacao-titulo").innerText = tituloModal;
+    document.getElementById("progresso-operacao-barra").style.width = "0%";
+    document.getElementById("progresso-operacao-texto").innerText = "Iniciando...";
+    modal.classList.remove("modal-oculto");
+}
+function atualizarProgressoOperacao(concluidos, total, emoji, tituloAba) {
+    const pct = total > 0 ? Math.min(100, Math.round((concluidos / total) * 100)) : 0;
+    const barra = document.getElementById("progresso-operacao-barra");
+    if (barra) barra.style.width = pct + "%";
+    const texto = document.getElementById("progresso-operacao-texto");
+    if (texto) texto.innerText = `${Math.min(Math.round(concluidos), total)} de ${total} (${pct}%)`;
+    document.title = `(${pct}%) ${emoji} ${tituloAba}`;
+}
+function esconderProgressoOperacao() {
+    const modal = document.getElementById("progresso-operacao-modal");
+    if (modal) modal.classList.add("modal-oculto");
+    if (tituloAbaAntesDoProgresso !== null) {
+        document.title = tituloAbaAntesDoProgresso;
+        tituloAbaAntesDoProgresso = null;
+    }
 }
 
 // NOVO: o resultado da importação (e principalmente os motivos de falha) vinha num alert() — texto de
@@ -1238,12 +1277,12 @@ function importarApkg(event) {
     if (!arquivo) return;
     event.target.value = "";
 
-    mostrarModalImportandoAnki(true);
+    mostrarProgressoOperacao("Importando baralho do Anki...", "📥");
 
     setTimeout(() => {
         processarImportacaoApkg(arquivo)
             .then(resumo => {
-                mostrarModalImportandoAnki(false);
+                esconderProgressoOperacao();
                 salvar();
                 let msg = `✅ ${resumo.sucesso} card(s) importado(s)\n⚠️ ${resumo.midiaNaoSuportada} card(s) com mídia não suportada (texto importado normalmente)\n❌ ${resumo.falhas} card(s) que falharam`;
                 if (resumo.exemplosFalha.length > 0) {
@@ -1254,7 +1293,7 @@ function importarApkg(event) {
             })
             .catch(err => {
                 console.error("Erro ao importar .apkg:", err);
-                mostrarModalImportandoAnki(false);
+                esconderProgressoOperacao();
                 const detalheTecnico = (err && err.message) ? err.message : String(err);
                 const msg = `Não foi possível importar esse arquivo.\n\nVerifique se é um .apkg válido exportado do Anki (baralhos muito novos, compactados com zstd, ainda não são suportados).\n\nErro técnico (copie esse texto e cole na conversa se quiser que eu investigue):\n${detalheTecnico}`;
                 mostrarResultadoImportacao("Falha ao importar", "❌", msg);
@@ -1310,6 +1349,10 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     const colunas = linhas[0].columns;
     const idxMid = colunas.indexOf("mid"), idxFlds = colunas.indexOf("flds"), idxDid = colunas.indexOf("did");
 
+    const totalNotas = linhas[0].values.length;
+    let processadas = 0;
+    atualizarProgressoOperacao(0, totalNotas, "📥", "Importando baralho...");
+
     const tarefas = linhas[0].values.map(linha => {
         const mid = String(linha[idxMid]);
         const did = String(linha[idxDid]);
@@ -1318,7 +1361,9 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
         const deckInfo = decksJson[did];
         const tema = deckInfo ? deckInfo.name : "Importado do Anki";
 
-        if (!modelo) { registrarFalha(resumo, `Tipo de nota (modelo) não encontrado no banco (mid ${mid}).`); return Promise.resolve(); }
+        const marcarProcessada = () => { processadas++; atualizarProgressoOperacao(processadas, totalNotas, "📥", "Importando baralho..."); };
+
+        if (!modelo) { registrarFalha(resumo, `Tipo de nota (modelo) não encontrado no banco (mid ${mid}).`); marcarProcessada(); return Promise.resolve(); }
 
         return converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice)
             .then(card => {
@@ -1328,7 +1373,8 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
                 dados.srsItems.push(card);
                 resumo.sucesso++;
             })
-            .catch(err => { registrarFalha(resumo, `[${modelo.name || "modelo sem nome"}] ${err.message || err}`); });
+            .catch(err => { registrarFalha(resumo, `[${modelo.name || "modelo sem nome"}] ${err.message || err}`); })
+            .finally(marcarProcessada);
     });
 
     return Promise.all(tarefas);
@@ -3975,12 +4021,19 @@ function gerarBackupComLivros(livrosParaIncluirArquivo) {
         return;
     }
 
-    alert(`Preparando backup com ${livrosParaIncluirArquivo.length} arquivo(s) de livro e ${idsImagens.size} imagem(ns) de card — isso pode levar alguns segundos, dependendo do tamanho.`);
-
     const zip = new JSZip();
     zip.file("dados.json", JSON.stringify(dados)); // metadados de TODOS os livros e cards, sempre — só o binário é seletivo
     const pastaLivros = zip.folder("livros");
     const pastaImagens = zip.folder("imagens_srs");
+
+    // Total inclui a etapa final de compactação do zip (pesa como se fosse 1 "item" a mais na barra),
+    // já que ela também pode demorar bastante em backups grandes.
+    const totalArquivos = livrosParaIncluirArquivo.length + idsImagens.size;
+    const totalEtapas = totalArquivos + 1;
+    let etapasConcluidas = 0;
+    mostrarProgressoOperacao("Gerando backup...", "💾");
+    atualizarProgressoOperacao(0, totalEtapas, "💾", "Gerando backup...");
+    const marcarEtapaConcluida = () => { etapasConcluidas++; atualizarProgressoOperacao(etapasConcluidas, totalEtapas, "💾", "Gerando backup..."); };
 
     // NOVO: carrega os arquivos em lotes pequenos (em vez de todos os livros/imagens em paralelo de
     // uma vez só) — evita ter, por exemplo, vários PDFs grandes na memória ao mesmo tempo, o que
@@ -4001,19 +4054,23 @@ function gerarBackupComLivros(livrosParaIncluirArquivo) {
     processarEmLotes(livrosParaIncluirArquivo, livro =>
         carregarArquivoLivro(livro.id).then(arrayBuffer => {
             if (arrayBuffer) pastaLivros.file(`${livro.id}.bin`, arrayBuffer);
-        }).catch(() => {})
+        }).catch(() => {}).finally(marcarEtapaConcluida)
     )
         .then(() => processarEmLotes([...idsImagens], id =>
             carregarImagemSRS(id).then(blob => {
                 if (blob) pastaImagens.file(`${id}.jpg`, blob);
-            }).catch(() => {})
+            }).catch(() => {}).finally(marcarEtapaConcluida)
         ))
         // streamFiles: reduz o pico de memória do JSZip ao montar o zip final (não precisa saber o
-        // tamanho comprimido de cada arquivo de antemão antes de escrevê-lo).
-        .then(() => zip.generateAsync({ type: "blob", streamFiles: true }))
-        .then(blob => baixarBlobComoArquivo(blob, "backup_rpg.zip"))
+        // tamanho comprimido de cada arquivo de antemão antes de escrevê-lo). onUpdate reporta o
+        // progresso da compactação em si (última "etapa" da barra).
+        .then(() => zip.generateAsync({ type: "blob", streamFiles: true }, metadata => {
+            atualizarProgressoOperacao(totalArquivos + (metadata.percent / 100), totalEtapas, "💾", "Compactando backup...");
+        }))
+        .then(blob => { esconderProgressoOperacao(); baixarBlobComoArquivo(blob, "backup_rpg.zip"); })
         .catch(err => {
             console.error("Erro ao gerar backup com livros:", err);
+            esconderProgressoOperacao();
             alert("Não foi possível gerar o backup com os arquivos. Tente novamente ou exporte só os dados.");
         });
 }

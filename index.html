@@ -592,11 +592,13 @@
         </div>
     </div>
 
-        <div id="importando-anki-modal" class="modal-oculto">
+        <div id="progresso-operacao-modal" class="modal-oculto">
         <div class="modal-content" style="max-width: 380px;">
-            <span class="emoji">⏳</span>
-            <h2>Importando...</h2>
-            <p style="color: #333; font-size: 0.9em;">Lendo o baralho do Anki, isso pode levar alguns segundos dependendo do tamanho do arquivo. Não feche nem recarregue a página.</p>
+            <span class="emoji" id="progresso-operacao-emoji">⏳</span>
+            <h2 id="progresso-operacao-titulo">Processando...</h2>
+            <p style="color: #333; font-size: 0.9em; margin-top: -8px;">Não feche nem recarregue a página.</p>
+            <div class="barra-progresso-fundo"><div id="progresso-operacao-barra" class="barra-progresso-fill"></div></div>
+            <p id="progresso-operacao-texto" style="font-size: 0.85em; color: var(--text-secondary); margin-top: 8px;"></p>
         </div>
     </div>
 
