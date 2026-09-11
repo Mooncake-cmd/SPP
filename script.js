@@ -1487,7 +1487,7 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
     // que a imagem/áudio dele já foi extraída acima — essas linhas sem valor são removidas.
     texto = texto.split("\n").map(l => l.trim()).filter(l => l && !/^[^:\n]{1,40}:\s*$/.test(l)).join("\n");
 
-    texto = converterSintaxeMigaku(texto);
+    texto = converterAnotacoesPinyin(texto);
 
     return Promise.all(tarefas).then(() => ({
         texto,
@@ -1520,14 +1520,36 @@ function decodificarSilabaPinyin(silaba) {
     }
     return silaba;
 }
-function converterSintaxeMigaku(texto) {
+// Marcadores invisíveis (caracteres da área de uso privado do Unicode — nunca aparecem em texto real)
+// usados pra "proteger" o HTML do hover de pinyin durante o escape do resto do texto (ver
+// escaparComPinyinHover). Sem isso, o <span> viraria texto cru quando a resposta fosse exibida.
+const MARCA_INICIO_PINYIN_HOVER = "";
+const MARCA_FIM_PINYIN_HOVER = "";
+
+function escaparAtributoHtml(texto) {
+    return escaparHtml(texto).replace(/"/g, "&quot;");
+}
+
+// NOVO: reconhece DOIS formatos de anotação de pinyin/leitura em cima de caracteres chineses/japoneses:
+// 1) Sintaxe do add-on Migaku: "caractere[pinyin_com_tom_numerico;classe_gramatical]" — decodifica o
+//    tom numérico pra acento (ex: "ta1" -> "tā").
+// 2) Sintaxe NATIVA do próprio Anki (furigana, sem add-on nenhum): "caractere[leitura]" — sem ponto e
+//    vírgula, usa a leitura exatamente como está escrita.
+// Em ambos os casos, gera um span que só mostra a leitura ao passar o mouse (replicando o hover que
+// existe no Anki), em vez de deixar sempre visível como antes.
+function converterAnotacoesPinyin(texto) {
     if (!texto || texto.indexOf('[') === -1) return texto;
-    return texto.replace(/([一-鿿]+?)\[(.*?)\]/g, (match, hanzi, colchete) => {
-        const leitura = (colchete.split(';')[0] || '').trim();
-        const silabas = leitura.match(/\S+?\d/g) || [];
-        if (silabas.length === 0) return hanzi;
-        const pinyin = silabas.map(decodificarSilabaPinyin).join('');
-        return `${hanzi} (${pinyin})`;
+    return texto.replace(/([一-鿿]+?)\[([^\]]*?)\]/g, (match, hanzi, colchete) => {
+        let leitura;
+        if (colchete.indexOf(';') !== -1) {
+            const primeiraLeitura = (colchete.split(';')[0] || '').trim();
+            const silabas = primeiraLeitura.match(/\S+?\d/g) || [];
+            leitura = silabas.length > 0 ? silabas.map(decodificarSilabaPinyin).join('') : primeiraLeitura;
+        } else {
+            leitura = colchete.trim();
+        }
+        if (!leitura) return hanzi;
+        return `${MARCA_INICIO_PINYIN_HOVER}<span class="hanzi-hover" data-pinyin="${escaparAtributoHtml(leitura)}">${escaparHtml(hanzi)}</span>${MARCA_FIM_PINYIN_HOVER}`;
     });
 }
 
@@ -1561,8 +1583,8 @@ function carregarRevisaoSRS() {
     } else {
         cardAtualRevisao = paraRevisar[0];
         const ehCloze = cardAtualRevisao.tipo === "cloze" && cardAtualRevisao.clozePartes;
-        const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) : escaparHtml(cardAtualRevisao.subtema);
-               const blocoResposta = ehCloze ? "" : `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${cardAtualRevisao.resposta ? escaparHtmlComQuebras(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'}</div>`;
+        const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) : escaparComPinyinHover(cardAtualRevisao.subtema);
+               const blocoResposta = ehCloze ? "" : `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${cardAtualRevisao.resposta ? escaparComPinyinHover(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'}</div>`;
         areaDisplay.innerHTML = `<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(cardAtualRevisao.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${cardAtualRevisao.intervalo_atual} dias</div>`;;
         controls.classList.add("oculto");
         if (btnRevelar) btnRevelar.classList.remove("oculto");
@@ -1664,9 +1686,9 @@ function renderizarListaSRS() {
             });
             corpoHtml = `<strong>🕳 ${fraseHtml}</strong><div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;">Resposta: ${escaparHtml(item.resposta)} <button class="btn-editar-cloze" onclick="carregarCardParaEdicao(${item.id})" title="Editar lacunas">✏️ Editar</button></div>`;
         } else {
-            const respostaTxt = item.resposta ? escaparHtmlComQuebras(item.resposta) : '(sem resposta — clique para adicionar)';
+            const respostaTxt = item.resposta ? escaparComPinyinHover(item.resposta) : '(sem resposta — clique para adicionar)';
             const temImagem = item.imagemPerguntaId || item.imagemRespostaId;
-            corpoHtml = `<strong contenteditable="true" onblur="editarCampoSRS(${item.id}, 'subtema', this.innerText)">${escaparHtml(item.subtema)}</strong>${temImagem ? ' <span title="Este card tem imagem">🖼️</span>' : ''}<div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;" contenteditable="true" onblur="editarCampoSRS(${item.id}, 'resposta', this.innerText)">${respostaTxt}</div>`;
+            corpoHtml = `<strong contenteditable="true" onblur="editarCampoSRS(${item.id}, 'subtema', this.innerText)">${escaparComPinyinHover(item.subtema)}</strong>${temImagem ? ' <span title="Este card tem imagem">🖼️</span>' : ''}<div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;" contenteditable="true" onblur="editarCampoSRS(${item.id}, 'resposta', this.innerText)">${respostaTxt}</div>`;
         }
         partesHtml.push(`<div class="srs-item-mini"><div style="flex:1;"><input class="srs-tag-input" list="lista-temas-srs" value="${escaparHtml(item.tema)}" onblur="editarCampoSRS(${item.id}, 'tema', this.value)"><br>${corpoHtml}</div><div style="text-align:right;"><div style="font-size:0.8em; color:var(--text-secondary); white-space:nowrap;">Rev: ${partesData[2]}/${partesData[1]}</div><button onclick="removerCardSRS(${item.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.2em;">&times;</button></div></div>`);
     });
@@ -2149,6 +2171,19 @@ function escaparHtml(texto) {
 // numa linha só. Usar isso em vez de escaparHtml() sempre que o texto puder ter mais de uma linha.
 function escaparHtmlComQuebras(texto) {
     return escaparHtml(texto).replace(/\n/g, "<br>");
+}
+
+// Mesma ideia de escaparHtmlComQuebras, mas preservando os spans de hover de pinyin que
+// converterAnotacoesPinyin() já deixou prontos e "protegidos" com os marcadores MARCA_INICIO/FIM —
+// escapa normalmente o texto ao redor, sem tocar no HTML seguro que a gente mesmo gerou.
+function escaparComPinyinHover(texto) {
+    const bruto = texto == null ? "" : String(texto);
+    if (bruto.indexOf(MARCA_INICIO_PINYIN_HOVER) === -1) return escaparHtmlComQuebras(bruto);
+    const regexSpan = new RegExp(`${MARCA_INICIO_PINYIN_HOVER}([\\s\\S]*?)${MARCA_FIM_PINYIN_HOVER}`, "g");
+    const partes = bruto.split(regexSpan);
+    // Depois do split, os índices ímpares são o conteúdo capturado (o <span> pronto, sem os marcadores);
+    // os pares são texto comum ao redor, que precisa ser escapado normalmente.
+    return partes.map((parte, idx) => idx % 2 === 1 ? parte : escaparHtml(parte)).join("").replace(/\n/g, "<br>");
 }
 
 // Evita que uma reconstrução de innerHTML disparada por um salvar() de OUTRA parte do app (ex: uma

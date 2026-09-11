@@ -768,3 +768,37 @@ button:hover { filter: brightness(0.9); }
 .swatch-cor.ativo { border-color: var(--secondary-color); box-shadow: 0 0 0 2px var(--secondary-color); }
 .desenho-imagem-canvas-wrapper { text-align: center; background: var(--table-header-bg); border-radius: 8px; padding: 10px; }
 #desenho-imagem-canvas { max-width: 100%; height: auto; cursor: crosshair; border: 1px solid var(--border-color); touch-action: none; }
+
+/* NOVO: hover de pinyin/leitura em cima de caracteres chineses/japoneses (sintaxe do Migaku ou
+   furigana nativa do Anki), imitando o comportamento de passar o mouse que existe no Anki. */
+.hanzi-hover {
+    position: relative;
+    cursor: help;
+    border-bottom: 1px dotted var(--secondary-color);
+}
+.hanzi-hover::after {
+    content: attr(data-pinyin);
+    position: absolute;
+    left: 50%;
+    bottom: 100%;
+    transform: translateX(-50%);
+    margin-bottom: 4px;
+    background: var(--card-bg);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 0.75em;
+    font-weight: normal;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px var(--shadow-color);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s ease;
+    pointer-events: none;
+    z-index: 10;
+}
+.hanzi-hover:hover::after {
+    opacity: 1;
+    visibility: visible;
+}
