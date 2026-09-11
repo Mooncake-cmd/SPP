@@ -1433,6 +1433,21 @@ function parsearClozeAnki(texto) {
     return segmentos.filter(s => s.texto !== "");
 }
 
+// NOVO: converte um trecho de HTML (já sem as imagens/áudios, que foram extraídos à parte) em texto
+// plano de verdade — usando o próprio parser HTML do navegador (via uma div nunca inserida na página,
+// mesma técnica seguraa já usada em escaparHtml) em vez de regex. Isso decodifica entidades HTML
+// corretamente (ex: "&nbsp;" vira espaço de verdade, não fica cru "&nbsp;" no meio do texto — muito
+// comum em campos "Example"/"Definição" de decks feitos em editores visuais), além de lidar melhor
+// com blocos aninhados do que a versão anterior só com regex.
+function converterHtmlParaTextoPlano(html) {
+    const comQuebras = (html || "")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<\/(div|p|li|tr|h[1-6])>/gi, "\n");
+    const div = document.createElement("div");
+    div.innerHTML = comQuebras;
+    return (div.textContent || "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 // NOVO: extrai TODAS as imagens e TODOS os áudios/vídeos de um campo (antes só pegava o 1º de cada
 // tipo) — decks com nota "rica" (várias imagens, ou áudio da frase + áudio da palavra, como o add-on
 // Migaku) tinham a maioria da mídia descartada, sobrando só como texto cru tipo "[sound:arquivo.mp3]".
@@ -1480,7 +1495,7 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
         return "";
     });
 
-    texto = texto.replace(/<br\s*\/?>/gi, "\n").replace(/<\/?[^>]+>/g, "").trim();
+    texto = converterHtmlParaTextoPlano(texto);
 
     // NOVO: quando vários campos foram combinados (nota com mais de 2 campos — ver converterNotaAnki),
     // um campo que era só imagem/áudio (ex: "Screenshot") vira um rótulo vazio ("Screenshot:") depois
