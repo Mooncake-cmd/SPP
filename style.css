@@ -553,9 +553,14 @@ button:hover { filter: brightness(0.9); }
     width: 18px; height: 18px; border-radius: 50%; font-size: 0.7em; line-height: 1;
     cursor: pointer; padding: 0;
 }
-.srs-card-imagem { margin: 10px 0; text-align: center; }
+/* align-self: stretch — o pai desses blocos é um flex container com align-items:center (não estica os
+   itens por padrão), então sem isso a largura de "100%" do <audio> não tem uma referência de verdade
+   pra calcular (o próprio pai só teria a largura do seu conteúdo). Em navegadores mais novos isso
+   normalmente resolve sozinho, mas no Chrome 109 (última versão pro Windows 7) o áudio colapsava pra
+   tamanho zero — presente no HTML, mas invisível e impossível de clicar. */
+.srs-card-imagem { margin: 10px 0; text-align: center; align-self: stretch; }
 .srs-card-imagem img { max-width: 100%; max-height: 300px; border-radius: 8px; box-shadow: 0 2px 8px var(--shadow-color); }
-.srs-card-midia { margin: 10px 0; text-align: center; }
+.srs-card-midia { margin: 10px 0; text-align: center; align-self: stretch; }
 .srs-card-midia audio { width: 100%; max-width: 320px; }
 .srs-card-midia video { max-width: 100%; max-height: 300px; border-radius: 8px; box-shadow: 0 2px 8px var(--shadow-color); }
 .cloze-preview {
