@@ -1569,10 +1569,81 @@ function importarApkg(event) {
                 console.error("Erro ao importar .apkg:", err);
                 esconderProgressoOperacao();
                 const detalheTecnico = (err && err.message) ? err.message : String(err);
-                const msg = `Não foi possível importar esse arquivo.\n\nVerifique se é um .apkg válido exportado do Anki (baralhos muito novos, compactados com zstd, ainda não são suportados).\n\nErro técnico (copie esse texto e cole na conversa se quiser que eu investigue):\n${detalheTecnico}`;
+                const msg = `Não foi possível importar esse arquivo.\n\nVerifique se é um .apkg válido exportado do Anki.\n\nErro técnico (copie esse texto e cole na conversa se quiser que eu investigue):\n${detalheTecnico}`;
                 mostrarResultadoImportacao("Falha ao importar", "❌", msg);
             });
     }, 50);
+}
+
+// ============================================================
+// === DECODIFICADOR MÍNIMO DE PROTOBUF PRO MAPA DE MÍDIA DO ANKI 2.1.50+ ===
+// ============================================================
+// Decks exportados pelo Anki 2.1.50 em diante não usam mais um JSON simples pra mapear os nomes
+// numéricos dentro do .zip pros nomes reais dos arquivos de mídia — usam uma mensagem protobuf
+// "MediaEntries" (ver proto/anki/import_export.proto no código-fonte do Anki). Em vez de trazer uma
+// biblioteca de protobuf inteira só pra isso, decodificamos à mão só os 2 campos que interessam:
+// MediaEntries { repeated MediaEntry entries = 1; }
+// MediaEntry { string name = 1; uint32 size = 2; bytes sha1 = 3; optional uint32 legacy_zip_filename = 255; }
+// Numa exportação nova (sem "buracos" na numeração), o Anki não preenche legacy_zip_filename — o nome
+// numérico do arquivo dentro do .zip é simplesmente a posição do MediaEntry na lista (0, 1, 2, ...),
+// então usamos o índice de iteração como padrão e só sobrescrevemos se legacy_zip_filename vier definido.
+function lerVarintProtobuf(bytes, pos) {
+    let resultado = 0, deslocamento = 0, b;
+    do {
+        b = bytes[pos++];
+        resultado |= (b & 0x7f) << deslocamento;
+        deslocamento += 7;
+    } while (b & 0x80);
+    return [resultado >>> 0, pos];
+}
+function pularCampoProtobuf(bytes, pos, wireType) {
+    if (wireType === 0) return lerVarintProtobuf(bytes, pos)[1]; // varint
+    if (wireType === 2) { const [tamanho, pos2] = lerVarintProtobuf(bytes, pos); return pos2 + tamanho; } // length-delimited
+    if (wireType === 5) return pos + 4; // 32-bit
+    if (wireType === 1) return pos + 8; // 64-bit
+    throw new Error("MediaEntries: wire type de protobuf não suportado (" + wireType + ")");
+}
+function decodificarMediaEntryProtobuf(bytes) {
+    let pos = 0, nome = null, indiceLegado = null;
+    while (pos < bytes.length) {
+        const [tag, pos1] = lerVarintProtobuf(bytes, pos);
+        const numeroCampo = tag >>> 3, wireType = tag & 0x7;
+        pos = pos1;
+        if (numeroCampo === 1 && wireType === 2) {
+            const [tamanho, pos2] = lerVarintProtobuf(bytes, pos);
+            nome = new TextDecoder("utf-8").decode(bytes.subarray(pos2, pos2 + tamanho));
+            pos = pos2 + tamanho;
+        } else if (numeroCampo === 255 && wireType === 0) {
+            const [valor, pos2] = lerVarintProtobuf(bytes, pos);
+            indiceLegado = valor;
+            pos = pos2;
+        } else {
+            pos = pularCampoProtobuf(bytes, pos, wireType);
+        }
+    }
+    return { nome, indiceLegado };
+}
+function decodificarMediaEntriesProtobuf(bytes) {
+    const mapaMedia = {};
+    let pos = 0, indiceIteracao = 0;
+    while (pos < bytes.length) {
+        const [tag, pos1] = lerVarintProtobuf(bytes, pos);
+        const numeroCampo = tag >>> 3, wireType = tag & 0x7;
+        pos = pos1;
+        if (numeroCampo === 1 && wireType === 2) {
+            const [tamanho, pos2] = lerVarintProtobuf(bytes, pos);
+            const entry = decodificarMediaEntryProtobuf(bytes.subarray(pos2, pos2 + tamanho));
+            pos = pos2 + tamanho;
+            if (entry.nome !== null) {
+                const indice = entry.indiceLegado !== null ? entry.indiceLegado : indiceIteracao;
+                mapaMedia[indice] = entry.nome;
+                indiceIteracao++;
+            }
+        } else {
+            pos = pularCampoProtobuf(bytes, pos, wireType);
+        }
+    }
+    return mapaMedia;
 }
 
 function processarImportacaoApkg(arquivo) {
@@ -1580,16 +1651,27 @@ function processarImportacaoApkg(arquivo) {
 
     return Promise.all([JSZip.loadAsync(arquivo), carregarSqlJs()]).then(([zip, SQL]) => {
         const arquivoMedia = zip.file("media");
-        const promessaMedia = arquivoMedia ? arquivoMedia.async("string").then(txt => JSON.parse(txt)) : Promise.resolve({});
+        const promessaMedia = arquivoMedia ? arquivoMedia.async("uint8array").then(bytes => {
+            try {
+                return JSON.parse(new TextDecoder("utf-8").decode(bytes));
+            } catch (e) {
+                return decodificarMediaEntriesProtobuf(bytes); // formato novo do Anki (2.1.50+)
+            }
+        }) : Promise.resolve({});
 
         return promessaMedia.then(mapaMedia => {
             const nomeParaIndice = {};
             Object.keys(mapaMedia).forEach(indice => { nomeParaIndice[mapaMedia[indice]] = indice; });
 
-            const arquivoDb = zip.file("collection.anki21") || zip.file("collection.anki2");
-            if (!arquivoDb) throw new Error("collection.anki2/anki21 não encontrado no .apkg.");
+            const arquivoDbPlano = zip.file("collection.anki21") || zip.file("collection.anki2");
+            const arquivoDbZstd = zip.file("collection.anki21b");
+            if (!arquivoDbPlano && !arquivoDbZstd) throw new Error("collection.anki2/anki21/anki21b não encontrado no .apkg.");
 
-            return arquivoDb.async("uint8array").then(bytes => {
+            const promessaBytesDb = arquivoDbPlano
+                ? arquivoDbPlano.async("uint8array")
+                : arquivoDbZstd.async("uint8array").then(bytesComprimidos => fzstd.decompress(bytesComprimidos));
+
+            return promessaBytesDb.then(bytes => {
                 const db = new SQL.Database(bytes);
                 try {
                     return processarBancoAnki(db, zip, nomeParaIndice, resumo);
