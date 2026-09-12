@@ -138,8 +138,36 @@ button:hover { filter: brightness(0.9); }
 /* NOVO: Chefões (boss battles) — barra de HP "inimiga" (roxo/laranja) pra ler diferente da do jogador */
 .barra-boss-fill { height: 100%; transition: width 0.5s ease-in-out; background: linear-gradient(90deg, #6a1b9a, #ff8f00); box-shadow: 0 0 10px rgba(106, 27, 154, 0.4); }
 .card-chefao { background: var(--table-header-bg); border-radius: 10px; padding: 14px 16px; border: 1px solid var(--border-color); }
-.card-chefao.chefao-derrotado { opacity: 0.6; }
 .lista-missoes-chefao { margin: 8px 0 0; padding-left: 1.2em; font-size: 0.85em; color: var(--text-secondary); }
+
+/* NOVO: Pacto do Tártaro — gaveta retrátil (details/summary nativo) com os chefões selados, no fim da
+   seção de Chefões, pra manter o painel principal limpo. */
+.pacto-tartaro { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--border-color); }
+.pacto-tartaro summary { cursor: pointer; font-weight: bold; color: var(--text-secondary); list-style: none; }
+.pacto-tartaro summary::-webkit-details-marker { display: none; }
+.pacto-tartaro summary::before { content: "▸ "; }
+.pacto-tartaro[open] summary::before { content: "▾ "; }
+
+/* Card de chefão selado: acinzentado (fora de combate), sombra escura pra dentro, e um par de
+   correntes decorativas nos cantos em vez da barra de HP normal. */
+.card-chefao-selado {
+    filter: grayscale(0.85);
+    border: 2px dashed #55535a;
+    box-shadow: inset 0 0 18px rgba(0,0,0,0.45), 0 0 6px rgba(0,0,0,0.3);
+    position: relative;
+    overflow: visible;
+}
+.card-chefao-selado::before, .card-chefao-selado::after {
+    content: "⛓️";
+    position: absolute;
+    font-size: 1.3em;
+    opacity: 0.9;
+    pointer-events: none;
+}
+.card-chefao-selado::before { top: -12px; left: -8px; transform: rotate(-20deg); }
+.card-chefao-selado::after { bottom: -12px; right: -8px; transform: rotate(160deg); }
+.texto-respawn-chefao { margin: 10px 0 0; font-size: 0.9em; color: var(--text-secondary); }
+.texto-respawn-chefao strong { color: var(--text-color); font-variant-numeric: tabular-nums; }
 
 /* CHECKLIST */
 .bloco-categoria { margin-top: 30px; }

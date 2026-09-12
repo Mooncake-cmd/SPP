@@ -37,6 +37,23 @@ if (!dados.materias) dados.materias = [];
 if (!dados.objetivos) dados.objetivos = [];
 if (!dados.historicoConquistas) dados.historicoConquistas = [];
 if (!dados.chefoes) dados.chefoes = [];
+// Migração: chefões criados antes do ciclo de vida Ativo/Selado usavam `concluido`/`xpRecompensa`.
+dados.chefoes.forEach(c => {
+    if (c.estado === undefined) {
+        if (c.concluido) {
+            c.estado = "selado";
+            c.dataSelado = c.dataSelado || new Date().toISOString();
+            c.respawnEm = c.respawnEm || new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+        } else {
+            c.estado = "ativo";
+            c.dataSelado = null;
+            c.respawnEm = null;
+        }
+        delete c.concluido;
+        delete c.dataConclusao;
+        delete c.xpRecompensa;
+    }
+});
 if (!dados.srsItems) dados.srsItems = [];
 dados.srsItems.forEach(i => { if (i.resposta === undefined) i.resposta = ""; }); // compatibilidade com cards antigos
 dados.srsItems.forEach(i => { if (!i.tipo) i.tipo = "normal"; }); // compatibilidade com cards antigos (antes do modo Cloze)
@@ -196,8 +213,12 @@ function resetDiario() {
         dados.itens.forEach(item => {
             const ativoNesseDia = !item.recorrencia || item.recorrencia.tipo === 'diaria' || (item.recorrencia.tipo === 'semanal' && item.recorrencia.diaSemana === diaSemanaProcessado);
             if (ativoNesseDia && !item.feito) {
-                danoDoDia += calcularPontosEscalonados(item);
+                const valor = calcularPontosEscalonados(item);
+                danoDoDia += valor;
                 item.diasSeguidosIncompleta = (item.diasSeguidosIncompleta || 0) + 1;
+                // NOVO: se essa missão está ligada a um chefão, não cumpri-la regenera o HP dele nesse
+                // mesmo valor — o dano que ele teria tomado se a missão fosse concluída.
+                if (item.chefaoId) regenerarChefao(item.chefaoId, valor);
             }
         });
 
@@ -374,19 +395,19 @@ function removerItem(index) {
 function editarCampo(index, campo, novoValor) { dados.itens[index][campo] = novoValor; salvar(); }
 
 // ============================================================
-// === CHEFÕES (boss battles) ===
+// === CHEFÕES (boss battles) — ciclo de vida: Ativo (Em Combate) <-> Selado no Tártaro ===
 // ============================================================
+
+const DIAS_RESPAWN_CHEFAO = 5;
 
 function adicionarChefao() {
     const nome = document.getElementById("chefao-nome").value.trim();
     const maxHp = parseInt(document.getElementById("chefao-hp").value);
-    const xpRecompensa = parseInt(document.getElementById("chefao-xp").value) || 0;
     if (!nome || !maxHp || maxHp <= 0) { alert("Preencha o nome e um HP máximo válido."); return; }
 
-    dados.chefoes.push({ id: Date.now(), nome, hp: maxHp, maxHp, xpRecompensa, concluido: false, dataConclusao: null });
+    dados.chefoes.push({ id: Date.now(), nome, hp: maxHp, maxHp, estado: "ativo", dataSelado: null, respawnEm: null });
     document.getElementById("chefao-nome").value = "";
     document.getElementById("chefao-hp").value = "";
-    document.getElementById("chefao-xp").value = "";
     salvar();
 }
 
@@ -397,39 +418,86 @@ function removerChefao(id) {
     salvar();
 }
 
-// Aplica dano a um chefão (chamado quando uma missão ligada a ele é concluída). Se isso zerar o HP dele
-// e ele ainda não estava derrotado, credita a recompensa em XP e registra a conquista — reaproveitando
-// o mesmo mural que arquivarObjetivo() já usa, em vez de criar uma lista nova só pra isso.
+// Aplica dano a um chefão ATIVO (chamado quando uma missão ligada a ele é concluída). Um chefão já
+// selado está fora de combate e não recebe dano. Ao zerar o HP: vira "selado", agenda o respawn pra
+// DIAS_RESPAWN_CHEFAO dias à frente, registra a conquista (sem XP — a derrota em si já é o marco) e
+// mostra o modal de vitória.
 function aplicarDanoChefao(chefaoId, dano) {
     const chefao = dados.chefoes.find(c => c.id === chefaoId);
-    if (!chefao) return;
+    if (!chefao || chefao.estado !== "ativo") return;
     chefao.hp = Math.max(0, chefao.hp - dano);
-    if (chefao.hp === 0 && !chefao.concluido) {
-        chefao.concluido = true;
-        chefao.dataConclusao = new Date().toLocaleDateString();
-        dados.pontosAcumulados += chefao.xpRecompensa;
-        dados.historicoConquistas.unshift({ titulo: chefao.nome, tipo: "Chefão", dataConclusao: chefao.dataConclusao, passos: [] });
+    if (chefao.hp === 0) {
+        chefao.estado = "selado";
+        chefao.dataSelado = new Date().toISOString();
+        chefao.respawnEm = new Date(Date.now() + DIAS_RESPAWN_CHEFAO * 24 * 60 * 60 * 1000).toISOString();
+        dados.historicoConquistas.unshift({ titulo: chefao.nome, tipo: "Chefão", dataConclusao: new Date().toLocaleDateString(), passos: [] });
         mostrarModalBossDerrotado(chefao);
     }
 }
 
-// Reverte o dano de uma missão desfeita/excluída — se isso trouxer o HP do chefão de volta a > 0, ele
-// "revive" (some o selo de derrotado), mas o XP de recompensa já creditado não é revogado — mesma
-// assimetria que o resto do desfazer de missão já tem hoje (a cura devolvida também não é 100% simétrica
-// em todo caso extremo).
+// Reverte o dano de uma missão desfeita/excluída. Se isso trouxer um chefão selado de volta a HP > 0,
+// ele volta a ficar ativo (cancela o selamento e o respawn agendado) — desfazer a missão que o derrotou
+// desfaz a derrota também.
 function reverterDanoChefao(chefaoId, dano) {
     const chefao = dados.chefoes.find(c => c.id === chefaoId);
     if (!chefao) return;
+    const estavaSelado = chefao.estado === "selado";
     chefao.hp = Math.min(chefao.maxHp, chefao.hp + dano);
-    if (chefao.concluido && chefao.hp > 0) {
-        chefao.concluido = false;
-        chefao.dataConclusao = null;
+    if (estavaSelado && chefao.hp > 0) {
+        chefao.estado = "ativo";
+        chefao.dataSelado = null;
+        chefao.respawnEm = null;
     }
+}
+
+// NOVO: regenera um chefão ATIVO quando uma missão ligada a ele NÃO é cumprida até virar o dia — o
+// mesmo valor de dano que ele teria tomado se a missão fosse concluída (chamado por resetDiario()).
+// Um chefão já selado não regenera por isso — ele só volta pelo respawn de tempo (verificarRespawnChefoes).
+function regenerarChefao(chefaoId, valor) {
+    const chefao = dados.chefoes.find(c => c.id === chefaoId);
+    if (!chefao || chefao.estado !== "ativo") return;
+    chefao.hp = Math.min(chefao.maxHp, chefao.hp + valor);
+}
+
+// Verifica todos os chefões selados e restaura (HP cheio, volta a "ativo") qualquer um cujo prazo de
+// respawn já passou. Retorna true se restaurou algum (pra quem chama saber se precisa re-renderizar).
+function verificarRespawnChefoes() {
+    const agora = Date.now();
+    let houveRespawn = false;
+    dados.chefoes.forEach(chefao => {
+        if (chefao.estado === "selado" && chefao.respawnEm && agora >= new Date(chefao.respawnEm).getTime()) {
+            chefao.hp = chefao.maxHp;
+            chefao.estado = "ativo";
+            chefao.dataSelado = null;
+            chefao.respawnEm = null;
+            houveRespawn = true;
+        }
+    });
+    return houveRespawn;
+}
+
+// Formata um intervalo em "NNd NNh NNm" (ex: "04d 22h 15m"), como o contador do Pacto do Tártaro.
+function formatarTempoRestante(ms) {
+    if (ms <= 0) return "00d 00h 00m";
+    const totalMinutos = Math.floor(ms / 60000);
+    const dias = Math.floor(totalMinutos / (60 * 24));
+    const horas = Math.floor((totalMinutos % (60 * 24)) / 60);
+    const minutos = totalMinutos % 60;
+    return `${String(dias).padStart(2, "0")}d ${String(horas).padStart(2, "0")}h ${String(minutos).padStart(2, "0")}m`;
+}
+
+// Atualiza só o texto dos contadores regressivos já na tela (sem reconstruir o DOM) — chamado a cada
+// tick do setInterval enquanto nenhum chefão selado ainda completou o respawn.
+function atualizarContadoresChefoesSelados() {
+    dados.chefoes.filter(c => c.estado === "selado").forEach(chefao => {
+        const el = document.getElementById(`contador-chefao-${chefao.id}`);
+        if (el) el.innerText = formatarTempoRestante(new Date(chefao.respawnEm).getTime() - Date.now());
+    });
 }
 
 function mostrarModalBossDerrotado(chefao) {
     document.getElementById("boss-derrotado-nome").innerText = chefao.nome;
-    document.getElementById("boss-derrotado-xp").innerText = chefao.xpRecompensa;
+    document.getElementById("boss-derrotado-dias").innerText = DIAS_RESPAWN_CHEFAO;
     document.getElementById("boss-derrotado-modal").classList.remove("modal-oculto");
 }
 function fecharModalBoss() { document.getElementById("boss-derrotado-modal").classList.add("modal-oculto"); }
@@ -441,48 +509,74 @@ function editarChefaoDaMissao(index, valor) {
 }
 
 // Monta as <option> de um <select> de chefão — usado tanto no form de Adicionar Missão quanto na
-// reatribuição por linha do checklist. Chefões derrotados continuam na lista (marcados) pra não sumir
+// reatribuição por linha do checklist. Chefões selados continuam na lista (marcados) pra não sumir
 // do select de uma missão que já estava ligada a eles.
 function opcoesChefaoHtml(chefaoIdSelecionado) {
     let html = `<option value=""${!chefaoIdSelecionado ? " selected" : ""}>Nenhum</option>`;
     dados.chefoes.forEach(c => {
-        const rotulo = c.concluido ? `${c.nome} (derrotado)` : c.nome;
+        const rotulo = c.estado === "selado" ? `${c.nome} (selado)` : c.nome;
         html += `<option value="${c.id}"${chefaoIdSelecionado === c.id ? " selected" : ""}>${escaparHtml(rotulo)}</option>`;
     });
     return html;
 }
 
-function renderizarChefoes() {
-    const area = document.getElementById("lista-chefoes");
-    if (!area) return;
-    if (dados.chefoes.length === 0) {
-        area.innerHTML = "<p style='color:var(--text-secondary); text-align:center;'>Nenhum chefão cadastrado ainda.</p>";
-    } else {
-        area.innerHTML = dados.chefoes.map(chefao => {
-            const percentual = chefao.maxHp > 0 ? Math.max(0, (chefao.hp / chefao.maxHp) * 100) : 0;
-            const missoesLigadas = dados.itens.filter(i => i.chefaoId === chefao.id);
-            const listaMissoes = missoesLigadas.length > 0
-                ? `<ul class="lista-missoes-chefao">${missoesLigadas.map(m => `<li>${escaparHtml(m.descricao)}</li>`).join("")}</ul>`
-                : `<p style="font-size:0.85em; color:var(--text-secondary);">Nenhuma missão ligada a esse chefão ainda.</p>`;
-            return `<div class="card-chefao ${chefao.concluido ? "chefao-derrotado" : ""}">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <strong>${escaparHtml(chefao.nome)}${chefao.concluido ? ' <span class="srs-tag" style="background:var(--danger-bg); color:var(--danger-color);">☠️ Derrotado</span>' : ""}</strong>
-                    <button onclick="removerChefao(${chefao.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.1em;">&times;</button>
-                </div>
-                <div class="barra-fundo-hp" style="margin-top:8px;"><div class="barra-boss-fill" style="width:${percentual}%;"></div></div>
-                <div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;">${chefao.hp} / ${chefao.maxHp} HP · recompensa: ${chefao.xpRecompensa} XP</div>
-                ${listaMissoes}
-            </div>`;
-        }).join("");
-    }
+function cardChefaoAtivoHtml(chefao) {
+    const percentual = chefao.maxHp > 0 ? Math.max(0, (chefao.hp / chefao.maxHp) * 100) : 0;
+    const missoesLigadas = dados.itens.filter(i => i.chefaoId === chefao.id);
+    const listaMissoes = missoesLigadas.length > 0
+        ? `<ul class="lista-missoes-chefao">${missoesLigadas.map(m => `<li>${escaparHtml(m.descricao)}</li>`).join("")}</ul>`
+        : `<p style="font-size:0.85em; color:var(--text-secondary);">Nenhuma missão ligada a esse chefão ainda.</p>`;
+    return `<div class="card-chefao">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>${escaparHtml(chefao.nome)}</strong>
+            <button onclick="removerChefao(${chefao.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.1em;">&times;</button>
+        </div>
+        <div class="barra-fundo-hp" style="margin-top:8px;"><div class="barra-boss-fill" style="width:${percentual}%;"></div></div>
+        <div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;">${chefao.hp} / ${chefao.maxHp} HP</div>
+        ${listaMissoes}
+    </div>`;
+}
 
-    // Atualiza também o select de vínculo no form de Adicionar Missão — só chefões ainda não derrotados
-    // fazem sentido pra ligar uma missão NOVA (um já derrotado não teria dano pra receber).
+function cardChefaoSeladoHtml(chefao) {
+    const restante = new Date(chefao.respawnEm).getTime() - Date.now();
+    return `<div class="card-chefao card-chefao-selado">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>${escaparHtml(chefao.nome)} <span class="srs-tag" style="background:var(--danger-bg); color:var(--danger-color);">⛓️ Selado</span></strong>
+            <button onclick="removerChefao(${chefao.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.1em;">&times;</button>
+        </div>
+        <p class="texto-respawn-chefao">Libertação do Tártaro em: <strong id="contador-chefao-${chefao.id}">${formatarTempoRestante(restante)}</strong></p>
+    </div>`;
+}
+
+function renderizarChefoes() {
+    verificarRespawnChefoes(); // corrige na hora qualquer chefão cujo prazo já passou, antes de desenhar
+
+    const areaAtivos = document.getElementById("lista-chefoes");
+    if (!areaAtivos) return;
+    const areaSelados = document.getElementById("lista-chefoes-selados");
+    const contagemSelados = document.getElementById("pacto-tartaro-contagem");
+
+    const ativos = dados.chefoes.filter(c => c.estado !== "selado");
+    const selados = dados.chefoes.filter(c => c.estado === "selado");
+
+    areaAtivos.innerHTML = ativos.length > 0
+        ? ativos.map(cardChefaoAtivoHtml).join("")
+        : "<p style='color:var(--text-secondary); text-align:center;'>Nenhum chefão em combate no momento.</p>";
+
+    if (areaSelados) {
+        areaSelados.innerHTML = selados.length > 0
+            ? selados.map(cardChefaoSeladoHtml).join("")
+            : "<p style='color:var(--text-secondary); text-align:center; font-size:0.9em;'>Nenhum chefão selado no momento.</p>";
+    }
+    if (contagemSelados) contagemSelados.innerText = selados.length;
+
+    // Select de vínculo no form de Adicionar Missão — só chefões ATIVOS fazem sentido pra ligar uma
+    // missão NOVA (um selado está fora de combate, sem dano pra receber até o respawn).
     const selectAdicionar = document.getElementById("item-chefao");
     if (selectAdicionar) {
         const valorAtual = selectAdicionar.value;
         let opcoes = `<option value="">Nenhum</option>`;
-        dados.chefoes.filter(c => !c.concluido).forEach(c => { opcoes += `<option value="${c.id}">${escaparHtml(c.nome)}</option>`; });
+        ativos.forEach(c => { opcoes += `<option value="${c.id}">${escaparHtml(c.nome)}</option>`; });
         selectAdicionar.innerHTML = opcoes;
         selectAdicionar.value = valorAtual; // preserva a escolha se ainda existir na lista
     }
@@ -4521,11 +4615,19 @@ function importarBackupComLivros(arquivo) {
     });
 }
 
-window.onload = function() { 
-    resetDiario(); 
-    verificarGameOver(); 
-    carregarPreferenciasTimer(); 
-    aplicarTema(); 
+window.onload = function() {
+    resetDiario();
+    verificarGameOver();
+    carregarPreferenciasTimer();
+    aplicarTema();
     verificarContasAVencer();
-    atualizar(); 
+    atualizar();
+
+    // NOVO: mantém o contador do Pacto do Tártaro correndo em tempo real enquanto a aba fica aberta —
+    // a cada segundo, ou só atualiza o texto dos contadores já na tela, ou (se algum chefão completou
+    // o respawn nesse meio tempo) reconstrói a lista de chefões e persiste o estado novo.
+    setInterval(() => {
+        if (verificarRespawnChefoes()) { renderizarChefoes(); salvarDados(); }
+        else atualizarContadoresChefoesSelados();
+    }, 1000);
 };
