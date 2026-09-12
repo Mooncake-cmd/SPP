@@ -412,6 +412,12 @@
                     <div id="epub-viewer" class="oculto"></div>
                     <div id="cbz-viewer" class="oculto">
                         <img id="cbz-imagem" alt="Página do quadrinho">
+                        <div class="cbz-zoom-controles">
+                            <button onclick="zoomCbzBotao(-1)" title="Diminuir zoom">−</button>
+                            <span class="cbz-zoom-nivel" id="cbz-zoom-nivel">100%</span>
+                            <button onclick="zoomCbzBotao(1)" title="Aumentar zoom">+</button>
+                            <button onclick="resetarZoomCbz()" title="Restaurar zoom">⤾</button>
+                        </div>
                     </div>
                 </div>
 

@@ -553,7 +553,30 @@ button:hover { filter: brightness(0.9); }
     flex: 1;
 }
 #pdf-canvas { height: auto; box-shadow: 0 2px 10px var(--shadow-color); }
-#cbz-imagem { max-width: 100%; height: auto; box-shadow: 0 2px 10px var(--shadow-color); display: inline-block; }
+
+/* Zoom/pan da página do CBZ: a imagem tem max-width:100% pra caber na tela, então o zoom nativo do
+   navegador reescala a página inteira e ela sempre "volta a caber" — nunca amplia só um trecho. Aqui
+   o zoom é aplicado via transform direto na imagem (independente do layout), com pan por arraste e
+   pinça em touch. #cbz-viewer vira o "visor": overflow:hidden recorta a imagem ampliada nos limites
+   dela, em vez de estourar o layout da página.
+*/
+#cbz-viewer { position: relative; overflow: hidden; touch-action: none; }
+#cbz-imagem {
+    max-width: 100%; height: auto; box-shadow: 0 2px 10px var(--shadow-color); display: inline-block;
+    transform-origin: 0 0; cursor: grab;
+}
+#cbz-imagem.cbz-arrastando { cursor: grabbing; }
+.cbz-zoom-controles {
+    position: absolute; right: 10px; bottom: 10px; z-index: 5;
+    display: flex; align-items: center; gap: 6px;
+    background: rgba(0, 0, 0, 0.6); padding: 6px 8px; border-radius: 8px;
+}
+.cbz-zoom-controles button {
+    width: 30px; height: 30px; padding: 0; font-size: 1.1em; line-height: 1;
+    background: rgba(255, 255, 255, 0.15); color: #fff; border: none; border-radius: 6px;
+}
+.cbz-zoom-controles button:hover { background: rgba(255, 255, 255, 0.3); }
+.cbz-zoom-nivel { color: #fff; font-size: 0.8em; min-width: 36px; text-align: center; }
 
 /* Camada de texto selecionável por cima do PDF */
 .pdf-page-wrapper {

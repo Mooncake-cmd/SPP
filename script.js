@@ -3087,6 +3087,7 @@ function abrirLeitorCbz(livro) {
                     document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
                     renderizarAnotacoesLivro(livro);
                     configurarUiLeitorPorTipo("cbz");
+                    inicializarZoomCbz();
 
                     renderizarPaginaCBZ(leitorPaginaAtual);
                 });
@@ -3097,6 +3098,7 @@ function abrirLeitorCbz(livro) {
 function renderizarPaginaCBZ(numPagina) {
     if (!leitorCbzPaginas.length || leitorRenderizando) return;
     leitorRenderizando = true;
+    resetarZoomCbz(); // cada página começa do zero — zoom de uma página não deveria "vazar" pra próxima
     const img = document.getElementById("cbz-imagem");
     img.onload = () => {
         leitorRenderizando = false;
@@ -3107,6 +3109,123 @@ function renderizarPaginaCBZ(numPagina) {
     };
     img.onerror = () => { leitorRenderizando = false; };
     img.src = leitorCbzPaginas[numPagina - 1];
+}
+
+// ============================================================
+// === ZOOM E PAN NA PÁGINA DO CBZ ===
+// ============================================================
+// A imagem tem max-width:100% pra caber inteira na tela — então o zoom NATIVO do navegador (Ctrl+scroll,
+// pinça) reescala a página toda junto, e a imagem "volta a caber" de novo, sem nunca ampliar só um
+// trecho. Aqui o zoom é aplicado via CSS transform direto na <img>, independente do layout da página:
+// dá pra ampliar um balão de texto pequeno e arrastar (mouse) ou usar pinça (touch) pra navegar nele.
+const CBZ_ZOOM_MIN = 1, CBZ_ZOOM_MAX = 4, CBZ_ZOOM_PASSO = 0.5;
+let cbzZoomAtual = 1, cbzPanX = 0, cbzPanY = 0;
+let cbzPonteirosAtivos = new Map(); // pointerId -> {x, y}, até 2 simultâneos (pinça)
+let cbzArrastando = false, cbzArrastoOrigemX = 0, cbzArrastoOrigemY = 0, cbzPanOrigemX = 0, cbzPanOrigemY = 0;
+let cbzPincaDistanciaInicial = 0, cbzPincaZoomInicial = 1;
+
+function aplicarTransformCbz() {
+    const img = document.getElementById("cbz-imagem");
+    if (!img) return;
+    img.style.transform = `translate(${cbzPanX}px, ${cbzPanY}px) scale(${cbzZoomAtual})`;
+    const nivelEl = document.getElementById("cbz-zoom-nivel");
+    if (nivelEl) nivelEl.innerText = Math.round(cbzZoomAtual * 100) + "%";
+}
+
+function resetarZoomCbz() {
+    cbzZoomAtual = 1;
+    cbzPanX = 0;
+    cbzPanY = 0;
+    aplicarTransformCbz();
+}
+
+// Aplica um novo zoom mantendo o ponto (mx, my) — em coordenadas do #cbz-viewer — fixo na tela, pra dar
+// de fato pra "ampliar" o trecho embaixo do cursor/dedo em vez de reescalar tudo a partir do canto.
+function zoomEmPontoCbz(mx, my, novoZoom) {
+    novoZoom = Math.min(CBZ_ZOOM_MAX, Math.max(CBZ_ZOOM_MIN, novoZoom));
+    if (novoZoom === cbzZoomAtual) return;
+    const fator = novoZoom / cbzZoomAtual;
+    cbzPanX = mx - fator * (mx - cbzPanX);
+    cbzPanY = my - fator * (my - cbzPanY);
+    cbzZoomAtual = novoZoom;
+    if (cbzZoomAtual === CBZ_ZOOM_MIN) { cbzPanX = 0; cbzPanY = 0; } // no mínimo, sempre centralizado
+    aplicarTransformCbz();
+}
+
+function zoomCbzBotao(direcao) {
+    const container = document.getElementById("cbz-viewer");
+    const rect = container.getBoundingClientRect();
+    zoomEmPontoCbz(rect.width / 2, rect.height / 2, cbzZoomAtual + direcao * CBZ_ZOOM_PASSO);
+}
+
+function inicializarZoomCbz() {
+    const container = document.getElementById("cbz-viewer");
+    const img = document.getElementById("cbz-imagem");
+    if (!container || !img || container.dataset.zoomInicializado) return;
+    container.dataset.zoomInicializado = "1";
+
+    container.addEventListener("wheel", e => {
+        e.preventDefault();
+        const rect = container.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        zoomEmPontoCbz(mx, my, cbzZoomAtual + (e.deltaY < 0 ? CBZ_ZOOM_PASSO : -CBZ_ZOOM_PASSO));
+    }, { passive: false });
+
+    container.addEventListener("dblclick", e => {
+        if (e.target.closest(".cbz-zoom-controles")) return;
+        const rect = container.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        zoomEmPontoCbz(mx, my, cbzZoomAtual > CBZ_ZOOM_MIN ? CBZ_ZOOM_MIN : 2.5);
+    });
+
+    // pointermove/pointerup ficam no window (não em setPointerCapture do container): assim o arraste
+    // continua funcionando direito mesmo se o ponteiro sair um pouco da área da imagem no meio do
+    // gesto — comportamento normal de mouse/dedo real, sem depender da API de captura de ponteiro.
+    container.addEventListener("pointerdown", e => {
+        // sem isso, um toque nos botões de +/-/reset (que ficam dentro do mesmo container, por cima da
+        // imagem) também é capturado aqui como início de arraste/pinça, e o clique do botão nunca chega
+        // a disparar.
+        if (e.target.closest(".cbz-zoom-controles")) return;
+        cbzPonteirosAtivos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (cbzPonteirosAtivos.size === 2) {
+            const pontos = Array.from(cbzPonteirosAtivos.values());
+            cbzPincaDistanciaInicial = Math.hypot(pontos[0].x - pontos[1].x, pontos[0].y - pontos[1].y);
+            cbzPincaZoomInicial = cbzZoomAtual;
+            cbzArrastando = false;
+        } else if (cbzPonteirosAtivos.size === 1 && cbzZoomAtual > CBZ_ZOOM_MIN) {
+            cbzArrastando = true;
+            cbzArrastoOrigemX = e.clientX; cbzArrastoOrigemY = e.clientY;
+            cbzPanOrigemX = cbzPanX; cbzPanOrigemY = cbzPanY;
+            img.classList.add("cbz-arrastando");
+        }
+    });
+
+    window.addEventListener("pointermove", e => {
+        if (!cbzPonteirosAtivos.has(e.pointerId)) return;
+        cbzPonteirosAtivos.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+        if (cbzPonteirosAtivos.size === 2 && cbzPincaDistanciaInicial > 0) {
+            const pontos = Array.from(cbzPonteirosAtivos.values());
+            const distanciaAtual = Math.hypot(pontos[0].x - pontos[1].x, pontos[0].y - pontos[1].y);
+            const rect = container.getBoundingClientRect();
+            const mx = (pontos[0].x + pontos[1].x) / 2 - rect.left;
+            const my = (pontos[0].y + pontos[1].y) / 2 - rect.top;
+            zoomEmPontoCbz(mx, my, cbzPincaZoomInicial * (distanciaAtual / cbzPincaDistanciaInicial));
+        } else if (cbzArrastando) {
+            cbzPanX = cbzPanOrigemX + (e.clientX - cbzArrastoOrigemX);
+            cbzPanY = cbzPanOrigemY + (e.clientY - cbzArrastoOrigemY);
+            aplicarTransformCbz();
+        }
+    });
+
+    const soltarPonteiroCbz = e => {
+        if (!cbzPonteirosAtivos.has(e.pointerId)) return;
+        cbzPonteirosAtivos.delete(e.pointerId);
+        if (cbzPonteirosAtivos.size < 2) cbzPincaDistanciaInicial = 0;
+        if (cbzPonteirosAtivos.size === 0) { cbzArrastando = false; img.classList.remove("cbz-arrastando"); }
+    };
+    window.addEventListener("pointerup", soltarPonteiroCbz);
+    window.addEventListener("pointercancel", soltarPonteiroCbz);
 }
 
 function registrarTemasEpub(rendition) {
