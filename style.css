@@ -593,6 +593,9 @@ button:hover { filter: brightness(0.9); }
 #cbz-imagem {
     max-width: 100%; height: auto; box-shadow: 0 2px 10px var(--shadow-color); display: inline-block;
     transform-origin: 0 0; cursor: grab;
+    /* imagens são arrastáveis por padrão (o gesto nativo de "arrastar pra fora" do navegador) — sem
+       isso, clicar e arrastar pra fazer pan dispara esse arraste nativo em vez do pan customizado. */
+    -webkit-user-drag: none; user-drag: none; -webkit-touch-callout: none; user-select: none;
 }
 #cbz-imagem.cbz-arrastando { cursor: grabbing; }
 .cbz-zoom-controles {

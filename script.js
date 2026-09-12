@@ -3187,6 +3187,7 @@ function inicializarZoomCbz() {
         // imagem) também é capturado aqui como início de arraste/pinça, e o clique do botão nunca chega
         // a disparar.
         if (e.target.closest(".cbz-zoom-controles")) return;
+        e.preventDefault(); // reforça o draggable=false do <img> — sem isso o navegador pode tentar iniciar o arraste nativo da imagem em vez do pan customizado
         cbzPonteirosAtivos.set(e.pointerId, { x: e.clientX, y: e.clientY });
         if (cbzPonteirosAtivos.size === 2) {
             const pontos = Array.from(cbzPonteirosAtivos.values());
