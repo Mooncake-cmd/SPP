@@ -4,11 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sistema Pessoal Hardcore</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1"></script>
+    <!-- pdf.js 3.x nunca recebeu correção pra CVE-2024-4367 (execução de JS arbitrário via PDF malicioso);
+         a versão corrigida (4.2.67+) só existe como módulo ES, por isso o import abaixo em vez de <script src>. -->
+    <script type="module">
+        import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/legacy/build/pdf.min.mjs";
+        window.pdfjsLib = pdfjsLib;
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.js"></script>   
-    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -755,6 +760,9 @@
         </div>
     </div>
 
-    <script src="script.js"></script>
+    <!-- defer: garante que o <script type="module"> do pdf.js (acima, no <head>) já rodou e
+         definiu window.pdfjsLib antes deste script começar (módulos e scripts com defer entram
+         na mesma fila de execução, na ordem em que aparecem no documento). -->
+    <script src="script.js" defer></script>
 </body>
 </html>

@@ -142,7 +142,7 @@ const AUDIOS = {
 
 // Configuração do worker do PDF.js (precisa apontar para a mesma versão do <script> no HTML)
 if (window.pdfjsLib) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.2.67/legacy/build/pdf.worker.min.mjs";
 }
 
 function hoje() { return new Date().toLocaleDateString(); }
