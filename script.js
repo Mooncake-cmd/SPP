@@ -146,7 +146,16 @@ if (window.pdfjsLib) {
 }
 
 function hoje() { return new Date().toLocaleDateString(); }
-function hojeISO() { return new Date().toISOString().split('T')[0]; }
+// Usa componentes locais (não toISOString(), que é UTC) — senão o "dia" do app vira algumas
+// horas antes da meia-noite local em fusos atrás de UTC (ex: Brasília, UTC-3), fazendo o
+// reset diário achar que "hoje" já foi processado quando a meia-noite local ainda nem chegou.
+function hojeISO() {
+    const d = new Date();
+    const ano = d.getFullYear();
+    const mes = String(d.getMonth() + 1).padStart(2, "0");
+    const dia = String(d.getDate()).padStart(2, "0");
+    return `${ano}-${mes}-${dia}`;
+}
 
 /* === FUNÇÕES BÁSICAS E DE DANO === */
 function salvarDados() { localStorage.setItem("dados", JSON.stringify(dados)); }
