@@ -27,6 +27,16 @@
         <button class="tab-btn" onclick="abrirAba(event, 'aba-srs')">🧠 Revisão Inteligente</button>
         <button class="tab-btn" onclick="abrirAba(event, 'aba-biblioteca')">📚 Biblioteca</button>
         <button class="tab-btn" onclick="abrirAba(event, 'aba-financas')">💰 Finanças</button>
+
+        <div class="calendario-mini" id="calendario-mini">
+            <div class="calendario-cabecalho">
+                <button onclick="mudarMesCalendario(-1)" title="Mês anterior">‹</button>
+                <span id="calendario-mes-ano">—</span>
+                <button onclick="mudarMesCalendario(1)" title="Próximo mês">›</button>
+            </div>
+            <div class="calendario-dias-semana"><span>D</span><span>S</span><span>T</span><span>Q</span><span>Q</span><span>S</span><span>S</span></div>
+            <div class="calendario-grade" id="calendario-grade"></div>
+        </div>
     </nav>
 
     <main class="container">
@@ -583,6 +593,20 @@
         </section>
 
     </main>
+
+    <div id="calendario-dia-modal" class="modal-oculto">
+        <div class="modal-content calendario-dia-modal-content">
+            <h3 id="calendario-dia-titulo"></h3>
+            <div id="calendario-dia-eventos"></div>
+            <h4>Lembretes</h4>
+            <div id="calendario-dia-lembretes-lista"></div>
+            <div class="calendario-add-lembrete">
+                <input type="text" id="input-novo-lembrete" placeholder="Novo lembrete..." onkeydown="if(event.key==='Enter') adicionarLembrete()">
+                <button onclick="adicionarLembrete()">+</button>
+            </div>
+            <button onclick="fecharModalDiaCalendario()" style="margin-top:15px; background: var(--text-secondary);">Fechar</button>
+        </div>
+    </div>
 
     <div id="level-up-modal" class="modal-oculto">
         <div class="modal-content">

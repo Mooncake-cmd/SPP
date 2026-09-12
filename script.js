@@ -84,6 +84,7 @@ if (dados.configTimer.mostrarPrevisao === undefined) dados.configTimer.mostrarPr
 if (!dados.tema) dados.tema = 'claro';
 if (!dados.progressoGlobal) dados.progressoGlobal = {};
 if (!dados.metasGlobais) dados.metasGlobais = { mes: 50, ano: 500 };
+if (!dados.lembretes) dados.lembretes = {}; // lembretes do calendário, por data ISO: { "2026-09-15": [{id, texto}] }
 if (dados.hp === undefined) dados.hp = 300;
 if (dados.maxHp === undefined) dados.maxHp = 300; 
 if (dados.pontosAcumulados === undefined) dados.pontosAcumulados = 0;
@@ -4865,6 +4866,123 @@ function importarBackupComLivros(arquivo) {
     });
 }
 
+// ============================================================
+// === CALENDÁRIO MINI (sidebar) — lembretes + eventos automáticos por dia ===
+// ============================================================
+const NOMES_MESES_CALENDARIO = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+const NOMES_DIAS_SEMANA_CALENDARIO = ["Domingo","Segunda","Terça","Quarta","Quinta","Sexta","Sábado"];
+
+let calendarioMesExibido = null; // Date do 1º dia do mês exibido no mini-calendário
+let calendarioDiaModalAberto = null; // data ISO do dia aberto no modal (pra saber onde adicionar/remover lembrete)
+
+function inicializarCalendario() {
+    const hoje = new Date();
+    calendarioMesExibido = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
+    renderizarCalendario();
+}
+
+function mudarMesCalendario(delta) {
+    calendarioMesExibido.setMonth(calendarioMesExibido.getMonth() + delta);
+    renderizarCalendario();
+}
+
+// Mesma lógica de hojeISO() (componentes locais, não toISOString()/UTC), só que pra uma data qualquer.
+function dataParaIsoLocal(d) {
+    const ano = d.getFullYear();
+    const mes = String(d.getMonth() + 1).padStart(2, "0");
+    const dia = String(d.getDate()).padStart(2, "0");
+    return `${ano}-${mes}-${dia}`;
+}
+
+// Junta tudo que já tem data marcada em outras partes do site pro dia informado: conta fixa vencendo,
+// prazo de objetivo/meta financeira, cards do SRS que vencem nesse dia. Não inclui missões (são diárias/
+// semanais recorrentes, não têm uma data futura específica de calendário).
+function eventosAutomaticosDoDia(dataIso) {
+    const eventos = [];
+    dados.financas.contasFixas.forEach(c => {
+        if (c.proximoVencimento === dataIso) eventos.push(`💰 ${c.nome} vence hoje (${formatarMoeda(c.valor)})`);
+    });
+    dados.objetivos.forEach(o => {
+        if (o.prazo === dataIso && !o.concluido) eventos.push(`🚀 Prazo do objetivo: ${o.titulo}`);
+    });
+    (dados.financas.metas || []).forEach(m => {
+        if (m.prazo === dataIso) eventos.push(`🎯 Prazo da meta: ${m.nome}`);
+    });
+    const cardsVencendo = dados.srsItems.filter(i => i.data_proxima_revisao === dataIso).length;
+    if (cardsVencendo > 0) eventos.push(`🧠 ${cardsVencendo} card(s) de revisão vencendo`);
+    return eventos;
+}
+
+function renderizarCalendario() {
+    if (!calendarioMesExibido) return;
+    const ano = calendarioMesExibido.getFullYear(), mes = calendarioMesExibido.getMonth();
+    document.getElementById("calendario-mes-ano").innerText = `${NOMES_MESES_CALENDARIO[mes]} ${ano}`;
+
+    const primeiroDiaSemana = new Date(ano, mes, 1).getDay(); // 0 = domingo
+    const totalDias = new Date(ano, mes + 1, 0).getDate();
+    const hojeIso = hojeISO();
+
+    let html = "";
+    for (let i = 0; i < primeiroDiaSemana; i++) html += `<span class="calendario-dia-vazio"></span>`;
+    for (let dia = 1; dia <= totalDias; dia++) {
+        const dataIso = dataParaIsoLocal(new Date(ano, mes, dia));
+        const temLembrete = dados.lembretes[dataIso] && dados.lembretes[dataIso].length > 0;
+        const temEvento = temLembrete || eventosAutomaticosDoDia(dataIso).length > 0;
+        const classes = ["calendario-dia"];
+        if (dataIso === hojeIso) classes.push("calendario-dia-hoje");
+        if (temEvento) classes.push("calendario-dia-com-evento");
+        html += `<button class="${classes.join(" ")}" onclick="abrirModalDiaCalendario('${dataIso}')">${dia}</button>`;
+    }
+    document.getElementById("calendario-grade").innerHTML = html;
+}
+
+function abrirModalDiaCalendario(dataIso) {
+    calendarioDiaModalAberto = dataIso;
+    const d = new Date(dataIso + "T00:00:00");
+    document.getElementById("calendario-dia-titulo").innerText = `${NOMES_DIAS_SEMANA_CALENDARIO[d.getDay()]}, ${d.getDate()} de ${NOMES_MESES_CALENDARIO[d.getMonth()].toLowerCase()}`;
+
+    const eventos = eventosAutomaticosDoDia(dataIso);
+    document.getElementById("calendario-dia-eventos").innerHTML = eventos.length
+        ? eventos.map(e => `<div class="calendario-evento-automatico">${escaparHtml(e)}</div>`).join("")
+        : `<p class="texto-vazio">Nenhum evento automático nesse dia.</p>`;
+
+    renderizarListaLembretes(dataIso);
+    document.getElementById("input-novo-lembrete").value = "";
+    document.getElementById("calendario-dia-modal").classList.remove("modal-oculto");
+}
+
+function renderizarListaLembretes(dataIso) {
+    const lista = dados.lembretes[dataIso] || [];
+    document.getElementById("calendario-dia-lembretes-lista").innerHTML = lista.length
+        ? lista.map(l => `<div class="calendario-lembrete-item"><span>${escaparHtml(l.texto)}</span><button onclick="removerLembrete('${dataIso}', ${l.id})" title="Remover">&times;</button></div>`).join("")
+        : `<p class="texto-vazio">Nenhum lembrete pra esse dia.</p>`;
+}
+
+function adicionarLembrete() {
+    const input = document.getElementById("input-novo-lembrete");
+    const texto = input.value.trim();
+    if (!texto || !calendarioDiaModalAberto) return;
+    if (!dados.lembretes[calendarioDiaModalAberto]) dados.lembretes[calendarioDiaModalAberto] = [];
+    dados.lembretes[calendarioDiaModalAberto].push({ id: Date.now(), texto: texto });
+    salvar();
+    input.value = "";
+    renderizarListaLembretes(calendarioDiaModalAberto);
+    renderizarCalendario(); // atualiza o marcador de "tem evento" na grade
+}
+
+function removerLembrete(dataIso, id) {
+    dados.lembretes[dataIso] = (dados.lembretes[dataIso] || []).filter(l => l.id !== id);
+    if (dados.lembretes[dataIso].length === 0) delete dados.lembretes[dataIso];
+    salvar();
+    renderizarListaLembretes(dataIso);
+    renderizarCalendario();
+}
+
+function fecharModalDiaCalendario() {
+    calendarioDiaModalAberto = null;
+    document.getElementById("calendario-dia-modal").classList.add("modal-oculto");
+}
+
 window.onload = function() {
     resetDiario();
     verificarGameOver();
@@ -4872,6 +4990,7 @@ window.onload = function() {
     aplicarTema();
     verificarContasAVencer();
     atualizar();
+    inicializarCalendario();
 
     // NOVO: mantém o contador do Pacto do Tártaro correndo em tempo real enquanto a aba fica aberta —
     // a cada segundo, ou só atualiza o texto dos contadores já na tela, ou (se algum chefão completou
