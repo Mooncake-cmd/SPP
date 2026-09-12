@@ -135,6 +135,12 @@ button:hover { filter: brightness(0.9); }
 .dano-previsto-txt { text-align: right; font-size: 0.75em; color: var(--text-secondary); margin-top: 4px; min-height: 1em; }
 #barra-hp-fill { height: 100%; width: 100%; transition: width 0.5s ease-in-out, background-color 0.3s; background: linear-gradient(90deg, #d32f2f, #ef5350); box-shadow: 0 0 10px rgba(229, 57, 53, 0.4); }
 
+/* NOVO: Chefões (boss battles) — barra de HP "inimiga" (roxo/laranja) pra ler diferente da do jogador */
+.barra-boss-fill { height: 100%; transition: width 0.5s ease-in-out; background: linear-gradient(90deg, #6a1b9a, #ff8f00); box-shadow: 0 0 10px rgba(106, 27, 154, 0.4); }
+.card-chefao { background: var(--table-header-bg); border-radius: 10px; padding: 14px 16px; border: 1px solid var(--border-color); }
+.card-chefao.chefao-derrotado { opacity: 0.6; }
+.lista-missoes-chefao { margin: 8px 0 0; padding-left: 1.2em; font-size: 0.85em; color: var(--text-secondary); }
+
 /* CHECKLIST */
 .bloco-categoria { margin-top: 30px; }
 .bloco-categoria h3 { background: var(--table-header-bg); padding: 8px 15px; border-radius: 6px; color: var(--text-color); border-left: 5px solid var(--secondary-color); }
@@ -147,7 +153,7 @@ button:hover { filter: brightness(0.9); }
 [contenteditable="true"]:focus { background: var(--input-bg); outline: 2px solid var(--secondary-color); }
 
 /* MODAIS */
-#level-up-modal, #dano-modal, #gameover-modal, #confirmacao-perigosa-modal, #prateleira-modal, #srs-temas-modal, #exportar-backup-modal, #desenho-imagem-modal, #progresso-operacao-modal, #resultado-importacao-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+#level-up-modal, #dano-modal, #gameover-modal, #confirmacao-perigosa-modal, #prateleira-modal, #srs-temas-modal, #exportar-backup-modal, #desenho-imagem-modal, #progresso-operacao-modal, #resultado-importacao-modal, #boss-derrotado-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; }
 .modal-oculto { display: none !important; }
 .modal-content { background: white; padding: 40px; border-radius: 20px; text-align: center; max-width: 400px; animation: pop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
 @keyframes pop { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }

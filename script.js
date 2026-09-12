@@ -11,6 +11,7 @@ var dados = dadosBrutos ? JSON.parse(dadosBrutos) : {
     materias: [], 
     objetivos: [], 
     historicoConquistas: [],
+    chefoes: [],
     srsItems: [],
     srsRevisoesLog: [],
     srsLimiteNovosPorDia: 20,
@@ -35,6 +36,7 @@ if (!dados.historicoEstudos) dados.historicoEstudos = [];
 if (!dados.materias) dados.materias = [];
 if (!dados.objetivos) dados.objetivos = [];
 if (!dados.historicoConquistas) dados.historicoConquistas = [];
+if (!dados.chefoes) dados.chefoes = [];
 if (!dados.srsItems) dados.srsItems = [];
 dados.srsItems.forEach(i => { if (i.resposta === undefined) i.resposta = ""; }); // compatibilidade com cards antigos
 dados.srsItems.forEach(i => { if (!i.tipo) i.tipo = "normal"; }); // compatibilidade com cards antigos (antes do modo Cloze)
@@ -71,6 +73,7 @@ if (dados.pontosAcumulados === undefined) dados.pontosAcumulados = 0;
 if (dados.ultimaData === undefined) dados.ultimaData = "";
 dados.itens.forEach(item => { if (!item.recorrencia) item.recorrencia = { tipo: 'diaria' }; }); // compatibilidade com missões antigas
 dados.itens.forEach(item => { if (item.diasSeguidosIncompleta === undefined) item.diasSeguidosIncompleta = 0; }); // compatibilidade com o escalonamento de dano/pontos
+dados.itens.forEach(item => { if (item.chefaoId === undefined) item.chefaoId = null; }); // compatibilidade com missões de antes dos Chefões
 dados.objetivos.forEach(o => { if (o.prazo === undefined) o.prazo = null; }); // compatibilidade com objetivos antigos
 dados.biblioteca.forEach(l => { if (!l.anotacoes) l.anotacoes = []; if (l.capaDataUrl === undefined) l.capaDataUrl = null; }); // compatibilidade com livros antigos
 
@@ -254,12 +257,12 @@ function executarConfirmacaoPerigosa() {
 }
 function confirmarGameOver() {
     pedirConfirmacaoPerigosa("Sua vida chegou a 0. Isso vai reiniciar seu progresso (RPG, timer, objetivos, SRS, biblioteca), mas suas missões do Checklist serão mantidas. Essa ação não pode ser desfeita.", () => {
-        const missoesPreservadas = dados.itens.map(item => ({ ...item, feito: false }));
+        const missoesPreservadas = dados.itens.map(item => ({ ...item, feito: false, chefaoId: null }));
         localStorage.removeItem("dados");
         const dadosNovos = {
             itens: missoesPreservadas,
             recompensas: [], historicoEstudos: [], materias: [], objetivos: [],
-            historicoConquistas: [], srsItems: [], srsRevisoesLog: [], biblioteca: [],
+            historicoConquistas: [], chefoes: [], srsItems: [], srsRevisoesLog: [], biblioteca: [],
             historicoDiario: [], streakAtual: 0, streakRecorde: 0,
             configTimer: { som: 'sino', notificacao: false, mostrarPrevisao: true },
             tema: dados.tema, srsLimiteNovosPorDia: dados.srsLimiteNovosPorDia, progressoGlobal: {}, metasGlobais: { mes: 50, ano: 500 },
@@ -317,8 +320,10 @@ function adicionarItem() {
     const recorrencia = tipoRecorrencia === 'semanal'
         ? { tipo: 'semanal', diaSemana: parseInt(document.getElementById("item-dia-semana").value) }
         : { tipo: 'diaria' };
+    const chefaoSelect = document.getElementById("item-chefao");
+    const chefaoId = chefaoSelect && chefaoSelect.value ? parseInt(chefaoSelect.value) : null;
 
-    dados.itens.push({ descricao: desc, pontos: pts, atributos: attrs, categoria: cat.trim() || "Geral", feito: false, recorrencia: recorrencia });
+    dados.itens.push({ descricao: desc, pontos: pts, atributos: attrs, categoria: cat.trim() || "Geral", feito: false, recorrencia: recorrencia, chefaoId: chefaoId });
     document.getElementById("desc").value = ""; document.getElementById("pts").value = ""; document.getElementById("attrs").value = ""; document.getElementById("cat").value = ""; salvar();
 }
 function alternarItem(index, marcado) {
@@ -334,6 +339,7 @@ function alternarItem(index, marcado) {
         dados.pontosAcumulados += pontosConcedidos;
         dados.hp += cura; if (dados.hp > dados.maxHp) dados.hp = dados.maxHp;
         listaAtributos.forEach(attr => { dados.maestriaAcumulada[attr] = (dados.maestriaAcumulada[attr] || 0) + 1; });
+        if (item.chefaoId) aplicarDanoChefao(item.chefaoId, pontosConcedidos);
 
         item.ultimoValorConcedido = pontosConcedidos;
         item.diasAntesDoUltimoCompleto = diasAntes;
@@ -343,25 +349,144 @@ function alternarItem(index, marcado) {
         const cura = Math.ceil(pontosDevolver / 2) || 1;
         dados.pontosAcumulados = Math.max(0, dados.pontosAcumulados - pontosDevolver);
         dados.hp -= cura;
+        // NOVO: reverte o dano no chefão ANTES do early-return de game over abaixo — senão desmarcar
+        // uma missão que também zera o HP do jogador nunca chegaria a devolver o HP do chefão.
+        if (item.chefaoId) reverterDanoChefao(item.chefaoId, pontosDevolver);
         if (dados.hp <= 0) { dados.hp = 0; item.feito = marcado; salvar(); verificarGameOver(); return; }
         listaAtributos.forEach(attr => { if (dados.maestriaAcumulada[attr]) dados.maestriaAcumulada[attr] = Math.max(0, dados.maestriaAcumulada[attr] - 1); });
         if (item.diasAntesDoUltimoCompleto !== undefined) item.diasSeguidosIncompleta = item.diasAntesDoUltimoCompleto; // restaura o atraso que havia antes
     }
     item.feito = marcado; salvar();
 }
-function removerItem(index) { 
-    if (confirm("Excluir?")) { 
-        let item = dados.itens[index]; 
-        if (item.feito) { 
+function removerItem(index) {
+    if (confirm("Excluir?")) {
+        let item = dados.itens[index];
+        if (item.feito) {
             const pontosConcedidos = item.ultimoValorConcedido !== undefined ? item.ultimoValorConcedido : (parseInt(item.pontos) || 0);
             dados.pontosAcumulados -= pontosConcedidos;
-            let lista = item.atributos.split(','); 
-            lista.forEach(a => { if(dados.maestriaAcumulada[a.trim()]) dados.maestriaAcumulada[a.trim()] -= 1; }); 
-        } 
+            let lista = item.atributos.split(',');
+            lista.forEach(a => { if(dados.maestriaAcumulada[a.trim()]) dados.maestriaAcumulada[a.trim()] -= 1; });
+            if (item.chefaoId) reverterDanoChefao(item.chefaoId, pontosConcedidos); // não deixa dano "preso" num chefão por causa de uma missão excluída
+        }
         dados.itens.splice(index, 1); salvar();
-    } 
+    }
 }
 function editarCampo(index, campo, novoValor) { dados.itens[index][campo] = novoValor; salvar(); }
+
+// ============================================================
+// === CHEFÕES (boss battles) ===
+// ============================================================
+
+function adicionarChefao() {
+    const nome = document.getElementById("chefao-nome").value.trim();
+    const maxHp = parseInt(document.getElementById("chefao-hp").value);
+    const xpRecompensa = parseInt(document.getElementById("chefao-xp").value) || 0;
+    if (!nome || !maxHp || maxHp <= 0) { alert("Preencha o nome e um HP máximo válido."); return; }
+
+    dados.chefoes.push({ id: Date.now(), nome, hp: maxHp, maxHp, xpRecompensa, concluido: false, dataConclusao: null });
+    document.getElementById("chefao-nome").value = "";
+    document.getElementById("chefao-hp").value = "";
+    document.getElementById("chefao-xp").value = "";
+    salvar();
+}
+
+function removerChefao(id) {
+    if (!confirm("Excluir este chefão? As missões ligadas a ele voltam a não ter chefão nenhum.")) return;
+    dados.itens.forEach(item => { if (item.chefaoId === id) item.chefaoId = null; });
+    dados.chefoes = dados.chefoes.filter(c => c.id !== id);
+    salvar();
+}
+
+// Aplica dano a um chefão (chamado quando uma missão ligada a ele é concluída). Se isso zerar o HP dele
+// e ele ainda não estava derrotado, credita a recompensa em XP e registra a conquista — reaproveitando
+// o mesmo mural que arquivarObjetivo() já usa, em vez de criar uma lista nova só pra isso.
+function aplicarDanoChefao(chefaoId, dano) {
+    const chefao = dados.chefoes.find(c => c.id === chefaoId);
+    if (!chefao) return;
+    chefao.hp = Math.max(0, chefao.hp - dano);
+    if (chefao.hp === 0 && !chefao.concluido) {
+        chefao.concluido = true;
+        chefao.dataConclusao = new Date().toLocaleDateString();
+        dados.pontosAcumulados += chefao.xpRecompensa;
+        dados.historicoConquistas.unshift({ titulo: chefao.nome, tipo: "Chefão", dataConclusao: chefao.dataConclusao, passos: [] });
+        mostrarModalBossDerrotado(chefao);
+    }
+}
+
+// Reverte o dano de uma missão desfeita/excluída — se isso trouxer o HP do chefão de volta a > 0, ele
+// "revive" (some o selo de derrotado), mas o XP de recompensa já creditado não é revogado — mesma
+// assimetria que o resto do desfazer de missão já tem hoje (a cura devolvida também não é 100% simétrica
+// em todo caso extremo).
+function reverterDanoChefao(chefaoId, dano) {
+    const chefao = dados.chefoes.find(c => c.id === chefaoId);
+    if (!chefao) return;
+    chefao.hp = Math.min(chefao.maxHp, chefao.hp + dano);
+    if (chefao.concluido && chefao.hp > 0) {
+        chefao.concluido = false;
+        chefao.dataConclusao = null;
+    }
+}
+
+function mostrarModalBossDerrotado(chefao) {
+    document.getElementById("boss-derrotado-nome").innerText = chefao.nome;
+    document.getElementById("boss-derrotado-xp").innerText = chefao.xpRecompensa;
+    document.getElementById("boss-derrotado-modal").classList.remove("modal-oculto");
+}
+function fecharModalBoss() { document.getElementById("boss-derrotado-modal").classList.add("modal-oculto"); }
+
+function editarChefaoDaMissao(index, valor) {
+    if (!dados.itens[index]) return;
+    dados.itens[index].chefaoId = valor ? parseInt(valor) : null;
+    salvar();
+}
+
+// Monta as <option> de um <select> de chefão — usado tanto no form de Adicionar Missão quanto na
+// reatribuição por linha do checklist. Chefões derrotados continuam na lista (marcados) pra não sumir
+// do select de uma missão que já estava ligada a eles.
+function opcoesChefaoHtml(chefaoIdSelecionado) {
+    let html = `<option value=""${!chefaoIdSelecionado ? " selected" : ""}>Nenhum</option>`;
+    dados.chefoes.forEach(c => {
+        const rotulo = c.concluido ? `${c.nome} (derrotado)` : c.nome;
+        html += `<option value="${c.id}"${chefaoIdSelecionado === c.id ? " selected" : ""}>${escaparHtml(rotulo)}</option>`;
+    });
+    return html;
+}
+
+function renderizarChefoes() {
+    const area = document.getElementById("lista-chefoes");
+    if (!area) return;
+    if (dados.chefoes.length === 0) {
+        area.innerHTML = "<p style='color:var(--text-secondary); text-align:center;'>Nenhum chefão cadastrado ainda.</p>";
+    } else {
+        area.innerHTML = dados.chefoes.map(chefao => {
+            const percentual = chefao.maxHp > 0 ? Math.max(0, (chefao.hp / chefao.maxHp) * 100) : 0;
+            const missoesLigadas = dados.itens.filter(i => i.chefaoId === chefao.id);
+            const listaMissoes = missoesLigadas.length > 0
+                ? `<ul class="lista-missoes-chefao">${missoesLigadas.map(m => `<li>${escaparHtml(m.descricao)}</li>`).join("")}</ul>`
+                : `<p style="font-size:0.85em; color:var(--text-secondary);">Nenhuma missão ligada a esse chefão ainda.</p>`;
+            return `<div class="card-chefao ${chefao.concluido ? "chefao-derrotado" : ""}">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <strong>${escaparHtml(chefao.nome)}${chefao.concluido ? ' <span class="srs-tag" style="background:var(--danger-bg); color:var(--danger-color);">☠️ Derrotado</span>' : ""}</strong>
+                    <button onclick="removerChefao(${chefao.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.1em;">&times;</button>
+                </div>
+                <div class="barra-fundo-hp" style="margin-top:8px;"><div class="barra-boss-fill" style="width:${percentual}%;"></div></div>
+                <div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;">${chefao.hp} / ${chefao.maxHp} HP · recompensa: ${chefao.xpRecompensa} XP</div>
+                ${listaMissoes}
+            </div>`;
+        }).join("");
+    }
+
+    // Atualiza também o select de vínculo no form de Adicionar Missão — só chefões ainda não derrotados
+    // fazem sentido pra ligar uma missão NOVA (um já derrotado não teria dano pra receber).
+    const selectAdicionar = document.getElementById("item-chefao");
+    if (selectAdicionar) {
+        const valorAtual = selectAdicionar.value;
+        let opcoes = `<option value="">Nenhum</option>`;
+        dados.chefoes.filter(c => !c.concluido).forEach(c => { opcoes += `<option value="${c.id}">${escaparHtml(c.nome)}</option>`; });
+        selectAdicionar.innerHTML = opcoes;
+        selectAdicionar.value = valorAtual; // preserva a escolha se ainda existir na lista
+    }
+}
 function editarCampoNumerico(index, campo, valor) {
     const num = parseInt(valor);
     if (isNaN(num) || num <= 0) { salvar(); return; } // valor inválido: apenas re-renderiza e mantém o antigo
@@ -3361,6 +3486,8 @@ function atualizar() {
     const dataDisplay = document.getElementById("data");
     if (dataDisplay) dataDisplay.innerText = "Hoje: " + hoje();
 
+    renderizarChefoes();
+
     // Checklist (só exibe missões ativas hoje: diárias sempre, semanais só no seu dia)
     // Não reconstrói enquanto a pessoa está editando um campo aqui (contenteditable focado) — ver elementoEmEdicaoDentroDe.
     var area = document.getElementById("checklists");
@@ -3374,7 +3501,7 @@ function atualizar() {
             categoriasAgrupadas[c].push({ ...item, originalIndex: index });
         });
         for (var nomeCat in categoriasAgrupadas) {
-            let html = `<div class="bloco-categoria"><h3>${escaparHtml(nomeCat)}</h3><table class='tabela-checklist'><thead><tr><th>✔️</th><th>Missão</th><th>Pts / ❤️ Cura</th><th>Atributos</th><th>Recorrência</th><th>Ação</th></tr></thead><tbody>`;
+            let html = `<div class="bloco-categoria"><h3>${escaparHtml(nomeCat)}</h3><table class='tabela-checklist'><thead><tr><th>✔️</th><th>Missão</th><th>Pts / ❤️ Cura</th><th>Atributos</th><th>Recorrência</th><th>Chefão</th><th>Ação</th></tr></thead><tbody>`;
             categoriasAgrupadas[nomeCat].forEach(item => {
                                 let pontosEfetivos = calcularPontosEscalonados(item);
                 let healAmount = Math.ceil(pontosEfetivos / 2) || 1;
@@ -3383,7 +3510,8 @@ function atualizar() {
                     ? `<span contenteditable="true" onblur="editarCampoNumerico(${item.originalIndex}, 'pontos', this.innerText)">${item.pontos}</span> <strong style="color:var(--danger-color);">(hoje: ${pontosEfetivos} XP)</strong> / +${healAmount} HP`
                     : `<span contenteditable="true" onblur="editarCampoNumerico(${item.originalIndex}, 'pontos', this.innerText)">${item.pontos}</span> XP / +${healAmount} HP`;
                 let seloAtraso = diasAtraso > 0 ? `<br><span class="srs-tag" style="background:var(--danger-bg); color:var(--danger-color); margin-top:4px;">🔥 ${diasAtraso}x atrasada</span>` : "";
-                html += `<tr><td><input type='checkbox' ${item.feito ? 'checked' : ''} onchange='alternarItem(${item.originalIndex}, this.checked)'></td><td contenteditable="true" onblur="editarCampo(${item.originalIndex}, 'descricao', this.innerText)">${escaparHtml(item.descricao)}</td><td>${celulaPontos}</td><td contenteditable="true" onblur="editarCampo(${item.originalIndex}, 'atributos', this.innerText)">${escaparHtml(item.atributos)}</td><td><span class="srs-tag">${textoRecorrencia(item)}</span>${seloAtraso}</td><td><button onclick='removerItem(${item.originalIndex})'>🗑️</button></td></tr>`;
+                let celulaChefao = `<select onchange="editarChefaoDaMissao(${item.originalIndex}, this.value)">${opcoesChefaoHtml(item.chefaoId)}</select>`;
+                html += `<tr><td><input type='checkbox' ${item.feito ? 'checked' : ''} onchange='alternarItem(${item.originalIndex}, this.checked)'></td><td contenteditable="true" onblur="editarCampo(${item.originalIndex}, 'descricao', this.innerText)">${escaparHtml(item.descricao)}</td><td>${celulaPontos}</td><td contenteditable="true" onblur="editarCampo(${item.originalIndex}, 'atributos', this.innerText)">${escaparHtml(item.atributos)}</td><td><span class="srs-tag">${textoRecorrencia(item)}</span>${seloAtraso}</td><td>${celulaChefao}</td><td><button onclick='removerItem(${item.originalIndex})'>🗑️</button></td></tr>`;
             });
             area.innerHTML += html + "</tbody></table></div>";
         }
