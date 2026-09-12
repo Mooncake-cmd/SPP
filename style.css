@@ -148,26 +148,62 @@ button:hover { filter: brightness(0.9); }
 .pacto-tartaro summary::before { content: "▸ "; }
 .pacto-tartaro[open] summary::before { content: "▾ "; }
 
-/* Card de chefão selado: acinzentado (fora de combate), sombra escura pra dentro, e um par de
-   correntes decorativas nos cantos em vez da barra de HP normal. */
+/* Card de chefão selado: um "mundo visual" próprio, escuro e fixo (não segue o tema claro/escuro da
+   página de propósito — é uma cela, não um painel comum), com uma corrente de verdade em SVG cruzando
+   o card (gerarElosCorrente/svgCorrenteChefaoSelado, script.js), placas entalhadas pro nome/status, e
+   o timer de retorno como elemento em destaque, com brilho. */
 .card-chefao-selado {
-    filter: grayscale(0.85);
-    border: 2px dashed #55535a;
-    box-shadow: inset 0 0 18px rgba(0,0,0,0.45), 0 0 6px rgba(0,0,0,0.3);
     position: relative;
-    overflow: visible;
+    overflow: hidden;
+    border-radius: 10px;
+    padding: 0;
+    border: 2px solid #362c1c;
+    background: radial-gradient(ellipse at 50% 35%, #1b2b27 0%, #0d1412 55%, #060807 100%);
+    box-shadow: inset 0 0 28px rgba(0,0,0,0.75), 0 4px 16px rgba(0,0,0,0.45);
 }
-.card-chefao-selado::before, .card-chefao-selado::after {
-    content: "⛓️";
-    position: absolute;
-    font-size: 1.3em;
-    opacity: 0.9;
-    pointer-events: none;
+.svg-corrente-chefao { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+.chefao-selado-conteudo { position: relative; z-index: 2; padding: 16px 18px; }
+
+.placa-nome-chefao {
+    display: inline-block;
+    background: linear-gradient(180deg, #3d3120, #201808);
+    border: 1px solid #6b5a3a;
+    border-radius: 5px;
+    padding: 4px 12px;
+    color: #e8d3a0;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-shadow: 0 1px 1px rgba(0,0,0,0.7);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.1), 0 1px 3px rgba(0,0,0,0.6);
 }
-.card-chefao-selado::before { top: -12px; left: -8px; transform: rotate(-20deg); }
-.card-chefao-selado::after { bottom: -12px; right: -8px; transform: rotate(160deg); }
-.texto-respawn-chefao { margin: 10px 0 0; font-size: 0.9em; color: var(--text-secondary); }
-.texto-respawn-chefao strong { color: var(--text-color); font-variant-numeric: tabular-nums; }
+.btn-remover-chefao-selado { background: none; border: none; color: #a8998a; padding: 2px 4px; font-size: 1.15em; cursor: pointer; line-height: 1; flex: none; }
+.btn-remover-chefao-selado:hover { color: #e05a4a; }
+
+.placa-status-chefao {
+    display: inline-block;
+    margin-top: 10px;
+    background: linear-gradient(180deg, #3a1f1a, #1c0f0c);
+    border: 1px solid #6b3a2f;
+    border-radius: 5px;
+    padding: 2px 10px;
+    font-size: 0.8em;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #e0a898;
+    text-shadow: 0 1px 1px rgba(0,0,0,0.7);
+}
+
+.bloco-timer-chefao { margin-top: 14px; text-align: center; }
+.timer-label-chefao { font-size: 0.72em; letter-spacing: 0.12em; text-transform: uppercase; color: #a8bcb5; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+.timer-valor-chefao {
+    margin-top: 2px;
+    font-size: 1.5em;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+    color: #ff7a5c;
+    text-shadow: 0 0 6px rgba(255,100,60,0.85), 0 0 16px rgba(255,60,30,0.5);
+    font-variant-numeric: tabular-nums;
+}
 
 /* CHECKLIST */
 .bloco-categoria { margin-top: 30px; }

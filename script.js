@@ -537,14 +537,54 @@ function cardChefaoAtivoHtml(chefao) {
     </div>`;
 }
 
+// Gera uma fileira de elos de corrente (elipses alternando rotação, imitando elos entrelaçados de
+// verdade) ao longo de uma linha reta — usado pra desenhar as duas correntes em X do card de chefão
+// selado, sem depender de nenhuma imagem externa (o site precisa continuar funcionando offline).
+function gerarElosCorrente(x1, y1, x2, y2, numElos) {
+    const anguloBase = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+    let elos = "";
+    for (let i = 0; i < numElos; i++) {
+        const t = i / (numElos - 1);
+        const x = (x1 + (x2 - x1) * t).toFixed(1);
+        const y = (y1 + (y2 - y1) * t).toFixed(1);
+        const rot = (anguloBase + (i % 2 === 0 ? 0 : 90)).toFixed(1);
+        elos += `<ellipse cx="${x}" cy="${y}" rx="11" ry="6.5" transform="rotate(${rot} ${x} ${y})" fill="none" stroke="url(#elo-grad-${anguloBase > 0 ? "a" : "b"})" stroke-width="2.4"/>`;
+    }
+    return elos;
+}
+
+// As duas correntes cruzadas em X que cobrem o card do chefão selado, do canto a canto.
+function svgCorrenteChefaoSelado() {
+    const elosDiagonal1 = gerarElosCorrente(6, 6, 294, 104, 9);
+    const elosDiagonal2 = gerarElosCorrente(294, 6, 6, 104, 9);
+    return `<svg class="svg-corrente-chefao" viewBox="0 0 300 110" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+        <defs>
+            <linearGradient id="elo-grad-a" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#9c9ca6"/><stop offset="55%" stop-color="#4a4a54"/><stop offset="100%" stop-color="#19191f"/>
+            </linearGradient>
+            <linearGradient id="elo-grad-b" x1="1" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#9c9ca6"/><stop offset="55%" stop-color="#4a4a54"/><stop offset="100%" stop-color="#19191f"/>
+            </linearGradient>
+        </defs>
+        <g opacity="0.4">${elosDiagonal1}${elosDiagonal2}</g>
+    </svg>`;
+}
+
 function cardChefaoSeladoHtml(chefao) {
     const restante = new Date(chefao.respawnEm).getTime() - Date.now();
     return `<div class="card-chefao card-chefao-selado">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-            <strong>${escaparHtml(chefao.nome)} <span class="srs-tag" style="background:var(--danger-bg); color:var(--danger-color);">⛓️ Selado</span></strong>
-            <button onclick="removerChefao(${chefao.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.1em;">&times;</button>
+        ${svgCorrenteChefaoSelado()}
+        <div class="chefao-selado-conteudo">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
+                <div class="placa-nome-chefao">${escaparHtml(chefao.nome)}</div>
+                <button onclick="removerChefao(${chefao.id})" class="btn-remover-chefao-selado" title="Excluir chefão">&times;</button>
+            </div>
+            <div class="placa-status-chefao">⛓️ Banido</div>
+            <div class="bloco-timer-chefao">
+                <div class="timer-label-chefao">Libertação do Tártaro em</div>
+                <div class="timer-valor-chefao" id="contador-chefao-${chefao.id}">${formatarTempoRestante(restante)}</div>
+            </div>
         </div>
-        <p class="texto-respawn-chefao">Libertação do Tártaro em: <strong id="contador-chefao-${chefao.id}">${formatarTempoRestante(restante)}</strong></p>
     </div>`;
 }
 
