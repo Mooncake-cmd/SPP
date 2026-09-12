@@ -4895,23 +4895,43 @@ function dataParaIsoLocal(d) {
     return `${ano}-${mes}-${dia}`;
 }
 
+// Cada categoria de aviso do calendário tem sua própria cor de bolinha — assim dá pra distinguir, só
+// olhando a grade, se um dia tem card de revisão vencendo (verde, como já era) ou outra coisa (conta,
+// prazo de objetivo/meta, lembrete livre) sem precisar abrir o dia.
+const CATEGORIAS_CALENDARIO = {
+    srs: { cor: "#4caf50", label: "Revisão (SRS)" }, // verde — mantido, como já era antes
+    conta: { cor: "#9c27b0", label: "Conta fixa" }, // roxo
+    objetivo: { cor: "#2196F3", label: "Prazo de objetivo" }, // azul
+    meta: { cor: "#ff9800", label: "Prazo de meta" }, // laranja
+    lembrete: { cor: "#e53935", label: "Lembrete" }, // vermelho
+};
+
 // Junta tudo que já tem data marcada em outras partes do site pro dia informado: conta fixa vencendo,
 // prazo de objetivo/meta financeira, cards do SRS que vencem nesse dia. Não inclui missões (são diárias/
-// semanais recorrentes, não têm uma data futura específica de calendário).
+// semanais recorrentes, não têm uma data futura específica de calendário). Cada evento carrega sua
+// categoria, usada tanto pra colorir a bolinha na grade quanto a borda dele dentro do modal do dia.
 function eventosAutomaticosDoDia(dataIso) {
     const eventos = [];
     dados.financas.contasFixas.forEach(c => {
-        if (c.proximoVencimento === dataIso) eventos.push(`💰 ${c.nome} vence hoje (${formatarMoeda(c.valor)})`);
+        if (c.proximoVencimento === dataIso) eventos.push({ categoria: "conta", texto: `💰 ${c.nome} vence hoje (${formatarMoeda(c.valor)})` });
     });
     dados.objetivos.forEach(o => {
-        if (o.prazo === dataIso && !o.concluido) eventos.push(`🚀 Prazo do objetivo: ${o.titulo}`);
+        if (o.prazo === dataIso && !o.concluido) eventos.push({ categoria: "objetivo", texto: `🚀 Prazo do objetivo: ${o.titulo}` });
     });
     (dados.financas.metas || []).forEach(m => {
-        if (m.prazo === dataIso) eventos.push(`🎯 Prazo da meta: ${m.nome}`);
+        if (m.prazo === dataIso) eventos.push({ categoria: "meta", texto: `🎯 Prazo da meta: ${m.nome}` });
     });
     const cardsVencendo = dados.srsItems.filter(i => i.data_proxima_revisao === dataIso).length;
-    if (cardsVencendo > 0) eventos.push(`🧠 ${cardsVencendo} card(s) de revisão vencendo`);
+    if (cardsVencendo > 0) eventos.push({ categoria: "srs", texto: `🧠 ${cardsVencendo} card(s) de revisão vencendo` });
     return eventos;
+}
+
+// Todas as categorias presentes num dia (eventos automáticos + lembretes livres, se houver), pra saber
+// quantas bolinhas de quais cores desenhar naquele dia na grade.
+function categoriasDoDia(dataIso) {
+    const categorias = new Set(eventosAutomaticosDoDia(dataIso).map(e => e.categoria));
+    if (dados.lembretes[dataIso] && dados.lembretes[dataIso].length > 0) categorias.add("lembrete");
+    return categorias;
 }
 
 function renderizarCalendario() {
@@ -4927,12 +4947,13 @@ function renderizarCalendario() {
     for (let i = 0; i < primeiroDiaSemana; i++) html += `<span class="calendario-dia-vazio"></span>`;
     for (let dia = 1; dia <= totalDias; dia++) {
         const dataIso = dataParaIsoLocal(new Date(ano, mes, dia));
-        const temLembrete = dados.lembretes[dataIso] && dados.lembretes[dataIso].length > 0;
-        const temEvento = temLembrete || eventosAutomaticosDoDia(dataIso).length > 0;
+        const categorias = categoriasDoDia(dataIso);
         const classes = ["calendario-dia"];
         if (dataIso === hojeIso) classes.push("calendario-dia-hoje");
-        if (temEvento) classes.push("calendario-dia-com-evento");
-        html += `<button class="${classes.join(" ")}" onclick="abrirModalDiaCalendario('${dataIso}')">${dia}</button>`;
+        const pontos = categorias.size
+            ? `<span class="calendario-dia-pontos">${Array.from(categorias).map(cat => `<i style="background:${CATEGORIAS_CALENDARIO[cat].cor}" title="${CATEGORIAS_CALENDARIO[cat].label}"></i>`).join("")}</span>`
+            : "";
+        html += `<button class="${classes.join(" ")}" onclick="abrirModalDiaCalendario('${dataIso}')"><span class="calendario-dia-numero">${dia}</span>${pontos}</button>`;
     }
     document.getElementById("calendario-grade").innerHTML = html;
 }
@@ -4944,7 +4965,7 @@ function abrirModalDiaCalendario(dataIso) {
 
     const eventos = eventosAutomaticosDoDia(dataIso);
     document.getElementById("calendario-dia-eventos").innerHTML = eventos.length
-        ? eventos.map(e => `<div class="calendario-evento-automatico">${escaparHtml(e)}</div>`).join("")
+        ? eventos.map(e => `<div class="calendario-evento-automatico" style="border-left-color:${CATEGORIAS_CALENDARIO[e.categoria].cor}">${escaparHtml(e.texto)}</div>`).join("")
         : `<p class="texto-vazio">Nenhum evento automático nesse dia.</p>`;
 
     renderizarListaLembretes(dataIso);

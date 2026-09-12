@@ -99,19 +99,21 @@ body {
 .calendario-cabecalho button:hover { color: var(--secondary-color); }
 .calendario-dias-semana { display: grid; grid-template-columns: repeat(7, 1fr); font-size: 0.65em; color: var(--text-secondary); text-align: center; margin-bottom: 2px; }
 .calendario-grade { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
-.calendario-dia, .calendario-dia-vazio { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; font-size: 0.75em; }
+.calendario-dia, .calendario-dia-vazio { aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 0.75em; }
 .calendario-dia-vazio { visibility: hidden; }
-.calendario-dia { background: none; border: none; border-radius: 4px; color: var(--text-color); cursor: pointer; position: relative; padding: 0; }
+.calendario-dia { background: none; border: none; border-radius: 4px; color: var(--text-color); cursor: pointer; position: relative; padding: 0; gap: 1px; }
 .calendario-dia:hover { background: var(--table-row-hover); }
 .calendario-dia-hoje { background: var(--secondary-color); color: white; font-weight: bold; }
-.calendario-dia-com-evento::after { content: ""; position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); width: 4px; height: 4px; border-radius: 50%; background: var(--primary-color); }
-.calendario-dia-hoje.calendario-dia-com-evento::after { background: white; }
+/* NOVO: cada categoria de aviso (revisão/conta/objetivo/meta/lembrete) tem sua própria cor de bolinha
+   — um dia pode acumular várias, uma por categoria presente naquele dia (ver CATEGORIAS_CALENDARIO). */
+.calendario-dia-pontos { display: flex; gap: 1px; justify-content: center; flex-wrap: wrap; max-width: 100%; line-height: 0; }
+.calendario-dia-pontos i { width: 3.5px; height: 3.5px; border-radius: 50%; display: inline-block; }
 
 .calendario-dia-modal-content { max-width: 380px; width: 90%; text-align: left; max-height: 85vh; overflow-y: auto; box-sizing: border-box; }
 .calendario-dia-modal-content h3 { text-align: center; margin-top: 0; color: var(--text-color); }
 .calendario-dia-modal-content h4 { margin-bottom: 8px; color: var(--text-color); }
 .calendario-evento-automatico { background: var(--table-header-bg); border-left: 3px solid var(--secondary-color); padding: 6px 10px; border-radius: 6px; margin-bottom: 6px; font-size: 0.9em; color: var(--text-color); }
-.calendario-lembrete-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; background: var(--table-header-bg); border-radius: 6px; margin-bottom: 6px; font-size: 0.9em; color: var(--text-color); }
+.calendario-lembrete-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; background: var(--table-header-bg); border-left: 3px solid #e53935; border-radius: 6px; margin-bottom: 6px; font-size: 0.9em; color: var(--text-color); }
 .calendario-lembrete-item button { background: none; border: none; color: var(--danger-color); font-size: 1em; cursor: pointer; padding: 0 4px; flex: none; }
 .calendario-add-lembrete { display: flex; gap: 6px; margin-top: 10px; }
 .calendario-add-lembrete input { flex: 1; }
