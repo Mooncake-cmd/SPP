@@ -4921,7 +4921,11 @@ function eventosAutomaticosDoDia(dataIso) {
     (dados.financas.metas || []).forEach(m => {
         if (m.prazo === dataIso) eventos.push({ categoria: "meta", texto: `🎯 Prazo da meta: ${m.nome}` });
     });
-    const cardsVencendo = dados.srsItems.filter(i => i.data_proxima_revisao === dataIso).length;
+    // No dia de hoje, conta igual à aba de Revisão faz (<=, ou seja, vencidos de dias anteriores entram
+    // no total de hoje também — é pra onde eles "acumulam" até serem revisados). Num dia futuro, só os
+    // cards que vencem exatamente naquele dia fazem sentido (ainda não é hoje pra eles "acumularem" nada).
+    const dataComparacao = dataIso === hojeISO() ? "<=" : "===";
+    const cardsVencendo = dados.srsItems.filter(i => dataComparacao === "<=" ? i.data_proxima_revisao <= dataIso : i.data_proxima_revisao === dataIso).length;
     if (cardsVencendo > 0) eventos.push({ categoria: "srs", texto: `🧠 ${cardsVencendo} card(s) de revisão vencendo` });
     return eventos;
 }
