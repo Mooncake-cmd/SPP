@@ -5429,6 +5429,13 @@ function importarDados(e) {
         try {
             if (confirm("Substituir dados?")) {
                 dados = JSON.parse(ev.target.result);
+                // NOVO: substituir "dados" inteiro troca dados.srsItems sem passar pelos pontos de
+                // mutação normais (push/filter/edição) que marcam srsItemsAlterado — sem isso,
+                // salvarDados() achava que os cards de SRS não tinham mudado e pulava a gravação no
+                // IndexedDB, deixando o conteúdo ANTIGO (de antes da importação) lá. No reload logo
+                // abaixo, esse conteúdo antigo era lido de volta e sobrescrevia silenciosamente os
+                // cards recém-importados — o backup parecia "não pegar" pro lado do SRS.
+                srsItemsAlterado = true;
                 salvar();
                 location.reload();
             }
@@ -5446,6 +5453,10 @@ function importarBackupComLivros(arquivo) {
 
         return arquivoDados.async("string").then(jsonTexto => {
             dados = JSON.parse(jsonTexto);
+            // NOVO: mesmo motivo do importarDados() acima — substituir "dados" inteiro não passa
+            // pelos pontos de mutação que marcam srsItemsAlterado, então salvarDados() pulava a
+            // gravação do SRS no IndexedDB e o conteúdo antigo (de antes do backup) voltava no reload.
+            srsItemsAlterado = true;
 
             const arquivosLivros = Object.keys(zip.files).filter(nome => nome.startsWith("livros/") && nome.toLowerCase().endsWith(".bin"));
             const arquivosImagens = Object.keys(zip.files).filter(nome => nome.startsWith("imagens_srs/") && nome.toLowerCase().endsWith(".jpg"));
