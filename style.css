@@ -996,3 +996,36 @@ button:hover { filter: brightness(0.9); }
 .srs-hint-anki[open] summary {
     margin-bottom: 6px;
 }
+
+/* NOVO: caixa por campo do HTML rico importado do Anki (ver camposFrente/camposVerso) — cada campo do
+   template original (ex: Afirmação, Embasamento) vira uma caixa separada, igual ao Anki organiza a
+   resposta em mais de um bloco. Sem rótulo de nome de propósito: o Anki também não mostra o nome do
+   campo, só o conteúdo. */
+.srs-campo-caixa {
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: var(--table-header-bg);
+    border-radius: 8px;
+    text-align: left;
+}
+.srs-campo-caixa:first-child {
+    margin-top: 0;
+}
+/* Imagens embutidas no meio do texto (fórmulas, símbolos matemáticos, screenshots) respeitam o
+   width/height originais do Anki (aplicados como max-width/max-height inline por sanitizarNoAnki) —
+   isso corrige tanto o logo aparecendo gigante quanto os símbolos pequenos ficando soltos numa lista à
+   parte; max-width:100% aqui é só uma rede de segurança pra imagem sem tamanho definido no HTML original
+   não estourar a largura do card. */
+.srs-campo-caixa img, .srs-hint-anki img {
+    max-width: 100%;
+    height: auto;
+    vertical-align: middle;
+}
+.srs-campo-caixa table, .srs-hint-anki table {
+    border-collapse: collapse;
+    margin: 6px 0;
+}
+.srs-campo-caixa td, .srs-campo-caixa th, .srs-hint-anki td, .srs-hint-anki th {
+    border: 1px solid var(--border-color);
+    padding: 4px 8px;
+}

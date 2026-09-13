@@ -1755,7 +1755,7 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
         const nomeCampoCloze = encontrarNomeCampoClozeAnki(modelo);
         const nomesCampos = (modelo.flds || []).map(f => f.name);
         const idx = nomeCampoCloze ? nomesCampos.indexOf(nomeCampoCloze) : -1;
-        return converterNotaClozeAnki(flds[idx !== -1 ? idx : 0] || "", tema, zip, nomeParaIndice);
+        return converterNotaClozeAnki(modelo, flds, idx !== -1 ? idx : 0, tema, zip, nomeParaIndice);
     }
 
     // NOVO: em vez de assumir por posição que o campo 0 é a frente e o campo 1+ vira a resposta
@@ -1899,6 +1899,268 @@ function resolverHintsAnki(html, hints) {
     return resultado;
 }
 
+// ============================================================
+// === PIPELINE NOVO: HTML rico por campo (preserva formatação/posição de imagem do Anki) ===
+// ============================================================
+// Tudo abaixo é ADITIVO: roda em paralelo ao pipeline antigo (extrairMidiaDoCampo +
+// converterHtmlParaTextoPlano), sem substituí-lo — subtema/resposta em texto puro continuam sendo
+// calculados exatamente como antes (usados por busca, edição de card, lista, backup), e só um campo
+// NOVO (camposFrente/camposVerso) é adicionado ao card quando o HTML rico existe. Como isso envolve
+// preservar HTML de um arquivo .apkg — não confiável — no mesmo localStorage/origem que guarda dados
+// financeiros do usuário, o sanitizador é allowlist estrita (nunca denylist) e nunca insere o HTML
+// bruto na página: o DOMParser roda numa árvore desconectada, então mesmo um <script> embutido nunca
+// chega a executar.
+const TAGS_ANKI_PERMITIDAS = new Set([
+    "B", "STRONG", "I", "EM", "U", "S", "SUP", "SUB", "SMALL", "BR", "HR", "DIV", "SPAN", "P",
+    "UL", "OL", "LI", "TABLE", "TBODY", "THEAD", "TR", "TD", "TH", "IMG"
+]);
+const PROPRIEDADES_CSS_ANKI_PERMITIDAS = new Set([
+    "color", "background-color", "font-weight", "font-style", "text-decoration", "text-align",
+    "border", "border-top", "border-bottom", "border-left", "border-right",
+    "padding", "padding-top", "padding-bottom", "padding-left", "padding-right",
+    "margin-top", "margin-bottom", "width", "max-width", "height", "max-height", "vertical-align"
+]);
+
+// Filtra um valor de atributo "style" pra só deixar passar propriedades inofensivas (a lista acima),
+// com valor curto e sem nada que possa carregar recurso externo ou executar código.
+function sanitizarEstiloInlineAnki(valorStyle) {
+    if (!valorStyle) return "";
+    const permitido = [];
+    String(valorStyle).split(";").forEach(parte => {
+        const idx = parte.indexOf(":");
+        if (idx === -1) return;
+        const prop = parte.slice(0, idx).trim().toLowerCase();
+        const valor = parte.slice(idx + 1).trim();
+        if (!PROPRIEDADES_CSS_ANKI_PERMITIDAS.has(prop)) return;
+        if (!valor || valor.length > 100) return;
+        if (/url\(|expression\(|javascript:|@import|[<>]/i.test(valor)) return;
+        permitido.push(`${prop}: ${valor}`);
+    });
+    return permitido.join("; ");
+}
+
+// Sanitiza (em memória, numa árvore DOM desconectada da página) o HTML de um campo do Anki: remove
+// por completo tags perigosas (com todo o conteúdo dentro) e "desembrulha" qualquer outra tag fora da
+// allowlist (mantém só texto/filhos); no que sobra, tira TODO atributo exceto um "style" já filtrado.
+// Em <img>, guarda width/height originais (antes de apagá-los) como max-width/max-height em px no
+// style — é isso que resolve tanto o logo aparecendo gigante (ignorava o width="30" do template)
+// quanto os símbolos matemáticos pequenos (que agora ficam na posição de verdade dentro do texto, não
+// soltos numa lista à parte). O src original vira um atributo temporário em vez de ir pro <img> de
+// verdade — nunca confiamos numa URL vinda do deck; a extração de mídia (via zip) resolve isso depois.
+function sanitizarNoAnki(raiz) {
+    const TAGS_REMOVER_INTEIRO = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK", "META", "FORM", "NOSCRIPT", "TEMPLATE"]);
+    let mudou = true;
+    while (mudou) {
+        mudou = false;
+        const todos = raiz.querySelectorAll("*");
+        for (const el of todos) {
+            if (TAGS_REMOVER_INTEIRO.has(el.tagName)) { el.remove(); mudou = true; break; }
+            if (!TAGS_ANKI_PERMITIDAS.has(el.tagName)) {
+                while (el.firstChild) el.parentNode.insertBefore(el.firstChild, el);
+                el.remove();
+                mudou = true; break;
+            }
+        }
+    }
+    raiz.querySelectorAll("*").forEach(el => {
+        const estiloSeguro = sanitizarEstiloInlineAnki(el.getAttribute("style"));
+        let imgInfo = null;
+        if (el.tagName === "IMG") {
+            imgInfo = {
+                src: el.getAttribute("src") || "",
+                alt: el.getAttribute("alt") || "",
+                largura: parseInt(el.getAttribute("width"), 10),
+                altura: parseInt(el.getAttribute("height"), 10)
+            };
+        }
+        Array.from(el.attributes).forEach(attr => el.removeAttribute(attr.name));
+        const estilos = estiloSeguro ? [estiloSeguro] : [];
+        if (imgInfo) {
+            if (imgInfo.src) el.setAttribute("data-srs-img-src-original", imgInfo.src);
+            if (imgInfo.alt) el.setAttribute("alt", imgInfo.alt);
+            if (!isNaN(imgInfo.largura) && imgInfo.largura > 0) estilos.push(`max-width: ${imgInfo.largura}px`);
+            if (!isNaN(imgInfo.altura) && imgInfo.altura > 0) estilos.push(`max-height: ${imgInfo.altura}px`);
+        }
+        if (estilos.length) el.setAttribute("style", estilos.join("; "));
+    });
+}
+
+// Mesma detecção de pinyin/furigana de converterAnotacoesPinyin, mas operando direto no DOM (usada só
+// pelo pipeline novo) — insere nós de verdade na árvore em vez de string+marcador invisível, então não
+// corre risco de colidir com os marcadores do pipeline antigo quando um hint tem pinyin dentro.
+function aplicarPinyinNosTextNodes(raiz) {
+    const regexTeste = /[一-鿿]+?\[[^\]]*?\]/;
+    const nos = [];
+    const walker = document.createTreeWalker(raiz, NodeFilter.SHOW_TEXT, null);
+    let no;
+    while ((no = walker.nextNode())) {
+        if (no.nodeValue && regexTeste.test(no.nodeValue)) nos.push(no);
+    }
+    nos.forEach(no => {
+        const texto = no.nodeValue;
+        const regex = /([一-鿿]+?)\[([^\]]*?)\]/g;
+        const frag = document.createDocumentFragment();
+        let ultimoIndice = 0, m, teveMatch = false;
+        while ((m = regex.exec(texto)) !== null) {
+            const [full, hanzi, colchete] = m;
+            let leitura;
+            if (colchete.indexOf(";") !== -1) {
+                const primeiraLeitura = (colchete.split(";")[0] || "").trim();
+                const silabas = primeiraLeitura.match(/\S+?\d/g) || [];
+                leitura = silabas.length > 0 ? silabas.map(decodificarSilabaPinyin).join("") : primeiraLeitura;
+            } else {
+                leitura = colchete.trim();
+            }
+            teveMatch = true;
+            if (m.index > ultimoIndice) frag.appendChild(document.createTextNode(texto.slice(ultimoIndice, m.index)));
+            if (leitura) {
+                const span = document.createElement("span");
+                span.className = "hanzi-hover";
+                span.setAttribute("data-pinyin", leitura);
+                span.textContent = hanzi;
+                frag.appendChild(span);
+            } else {
+                frag.appendChild(document.createTextNode(hanzi));
+            }
+            ultimoIndice = m.index + full.length;
+        }
+        if (!teveMatch) return;
+        if (ultimoIndice < texto.length) frag.appendChild(document.createTextNode(texto.slice(ultimoIndice)));
+        no.parentNode.replaceChild(frag, no);
+    });
+}
+
+// Converte um campo bruto do Anki (HTML de verdade — negrito, tabela, cor, sublinhado, <img>
+// posicionada no meio do texto etc.) num bloco de HTML seguro, em vez de achatar tudo pra texto puro
+// como o pipeline antigo (extrairMidiaDoCampo) faz. Roda em paralelo a ele, sem alterá-lo.
+function extrairCampoAnkiComoHtml(campoHtmlBruto, zip, nomeParaIndice) {
+    const bruto = (campoHtmlBruto || "").replace(/\[sound:([^\]]+)\]/gi, (m, nomeArquivo) =>
+        `<span data-srs-midia-src-original="${escaparAtributoHtml(nomeArquivo)}"></span>`
+    );
+
+    const doc = new DOMParser().parseFromString(bruto, "text/html");
+    sanitizarNoAnki(doc.body);
+    aplicarPinyinNosTextNodes(doc.body);
+
+    const tarefas = [];
+    let midiaNaoSuportada = false;
+
+    doc.body.querySelectorAll("img[data-srs-img-src-original]").forEach(img => {
+        const src = img.getAttribute("data-srs-img-src-original");
+        img.removeAttribute("data-srs-img-src-original");
+        const indice = nomeParaIndice[src];
+        if (indice !== undefined && zip.file(indice)) {
+            tarefas.push(
+                zip.file(indice).async("blob").then(blob => {
+                    const novoId = `anki_img_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+                    return salvarImagemSRS(novoId, blob).then(() => { img.setAttribute("data-srs-img-id", novoId); });
+                }).catch(() => { midiaNaoSuportada = true; img.remove(); })
+            );
+        } else {
+            midiaNaoSuportada = true;
+            img.remove();
+        }
+    });
+
+    doc.body.querySelectorAll("[data-srs-midia-src-original]").forEach(span => {
+        const nomeArquivo = span.getAttribute("data-srs-midia-src-original");
+        span.removeAttribute("data-srs-midia-src-original");
+        const extensao = (nomeArquivo.split(".").pop() || "").toLowerCase();
+        const tipo = ["mp4", "webm", "mov", "ogv"].includes(extensao) ? "video" : "audio";
+        const indice = nomeParaIndice[nomeArquivo];
+        if (indice !== undefined && zip.file(indice)) {
+            tarefas.push(
+                zip.file(indice).async("blob").then(blob => {
+                    const novoId = `anki_midia_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+                    return salvarImagemSRS(novoId, blob).then(() => {
+                        span.setAttribute("data-srs-midia-id", novoId);
+                        span.setAttribute("data-srs-midia-tipo", tipo);
+                    });
+                }).catch(() => { midiaNaoSuportada = true; span.remove(); })
+            );
+        } else {
+            midiaNaoSuportada = true;
+            span.remove();
+        }
+    });
+
+    return Promise.all(tarefas).then(() => {
+        const html = doc.body.innerHTML.trim();
+        const texto = (doc.body.textContent || "").trim();
+        const temMidia = !!(doc.body.querySelector("img[data-srs-img-id]") || doc.body.querySelector("[data-srs-midia-id]"));
+        return { html, texto, temConteudo: !!(texto || temMidia), midiaNaoSuportada };
+    });
+}
+
+// Resolve, dentro de um container JÁ inserido na página, os placeholders de imagem/mídia deixados por
+// extrairCampoAnkiComoHtml (data-srs-img-id / data-srs-midia-id) em elementos de verdade com blob URL
+// — feito à parte porque URL.createObjectURL() só vale pra esta sessão de página, tem que ser refeito
+// toda vez que o card é exibido (o card salvo só guarda o id do IndexedDB, nunca a URL). Retorna a
+// lista de blob URLs criadas, pra quem chamar liberar depois (ver limparUrlsImagemRevisao).
+function resolverMidiaInlineNoContainer(container) {
+    if (!container) return Promise.resolve([]);
+    const urls = [];
+    const tarefas = [];
+
+    container.querySelectorAll("img[data-srs-img-id]").forEach(img => {
+        tarefas.push(carregarImagemSRS(img.getAttribute("data-srs-img-id")).then(blob => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            urls.push(url);
+            img.src = url;
+        }).catch(() => {}));
+    });
+
+    container.querySelectorAll("[data-srs-midia-id]").forEach(span => {
+        const tipo = span.getAttribute("data-srs-midia-tipo");
+        tarefas.push(carregarImagemSRS(span.getAttribute("data-srs-midia-id")).then(blob => {
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            urls.push(url);
+            const elMidia = document.createElement(tipo === "video" ? "video" : "audio");
+            elMidia.src = url;
+            elMidia.controls = true;
+            span.replaceWith(elMidia);
+        }).catch(() => {}));
+    });
+
+    return Promise.all(tarefas).then(() => urls);
+}
+
+// Descobre em que ORDEM os campos aparecem visualmente num template já limpo (qfmt/afmt) — usado pra
+// desenhar as caixas por campo na mesma ordem do layout original do Anki. Ignora nomes que não são
+// campos de verdade da nota (FrontSide, Tags, Type, Deck, Subdeck, Card) e marca quais vieram de
+// {{hint:Campo}} (viram caixa expansível, não caixa normal).
+function ordemDosCamposNoTemplate(templateLimpo, nomesCampos) {
+    const ordem = [];
+    const vistos = new Set();
+    const regex = /\{\{([#^\/]?)(?:([\w-]+):)?([^}]+)\}\}/g;
+    let m;
+    while ((m = regex.exec(templateLimpo)) !== null) {
+        if (m[1]) continue; // abertura/fechamento de seção ({{#Campo}}/{{/Campo}}/{{^Campo}}), não um campo pra exibir
+        const nome = m[3].trim();
+        if (!nomesCampos.includes(nome) || vistos.has(nome)) continue;
+        vistos.add(nome);
+        ordem.push({ nome, hint: m[2] === "hint" });
+    }
+    return ordem;
+}
+
+// Monta as caixas visuais por campo (camposFrente/camposVerso) na mesma ordem em que apareciam no
+// template original do Anki. Campos normais viram uma caixa simples, sem rótulo de nome — o próprio
+// Anki também não mostra o nome do campo, só o conteúdo, então um rótulo nosso pareceria menos fiel,
+// não mais. Campos que eram {{hint:Campo}} no template viram a mesma caixa expansível "+ Saiba mais"
+// usada no resto do pipeline (ver resolverHintsAnki).
+function montarCaixasCamposAnki(campos) {
+    return campos.map(c => {
+        if (c.hint) {
+            const nomeLimpo = c.nome.replace(/^[✚+*]\s*/, "");
+            return `<details class="srs-hint-anki"><summary>➕ ${escaparHtml(nomeLimpo)}</summary>${c.html}</details>`;
+        }
+        return `<div class="srs-campo-caixa">${c.html}</div>`;
+    }).join("");
+}
+
 function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaIndice) {
     const nomesCampos = (modelo.flds || []).map(f => f.name);
     // Extrai mídia/texto de CADA CAMPO isoladamente primeiro (exatamente como já fazíamos pra decks
@@ -1907,7 +2169,10 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
     // limparTemplateAnki.
     return Promise.all(nomesCampos.map((nome, i) => {
         const raw = flds[i] || "";
-        return extrairMidiaDoCampo(raw, zip, nomeParaIndice).then(r => ({ nome, raw, ...r }));
+        return Promise.all([
+            extrairMidiaDoCampo(raw, zip, nomeParaIndice),
+            extrairCampoAnkiComoHtml(raw, zip, nomeParaIndice)
+        ]).then(([r, rico]) => ({ nome, raw, ...r, rico }));
     })).then(resultadosPorCampo => {
         const campos = {};
         resultadosPorCampo.forEach(r => { campos[r.nome] = r; });
@@ -1940,6 +2205,21 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         aplicarMidiasExtraidasNoCard(card, "Pergunta", { imagens: imagensFrente, midias: midiasFrente });
         aplicarMidiasExtraidasNoCard(card, "Resposta", { imagens: imagensVerso, midias: midiasVerso });
         card._midiaNaoSuportada = midiaNaoSuportada;
+
+        // NOVO: além do subtema/resposta em texto puro acima (mantidos por compatibilidade — busca,
+        // edição de card, lista, backup continuam funcionando igual), monta também um HTML rico por
+        // campo (preserva formatação, imagem POSICIONADA no lugar certo, tabelas etc.), na mesma ordem
+        // visual do template original — usado pela tela de revisão quando disponível (ver
+        // carregarRevisaoSRS/montarCaixasCamposAnki).
+        const camposFrenteRicos = ordemDosCamposNoTemplate(prep.qfmt, nomesCampos)
+            .map(c => ({ ...c, campo: campos[c.nome] }))
+            .filter(c => c.campo && c.campo.rico.temConteudo);
+        const camposVersoRicos = ordemDosCamposNoTemplate(prep.afmt, nomesCampos)
+            .map(c => ({ ...c, campo: campos[c.nome] }))
+            .filter(c => c.campo && c.campo.rico.temConteudo);
+        if (camposFrenteRicos.length > 0) card.camposFrente = camposFrenteRicos.map(c => ({ nome: c.nome, html: c.campo.rico.html, hint: c.hint }));
+        if (camposVersoRicos.length > 0) card.camposVerso = camposVersoRicos.map(c => ({ nome: c.nome, html: c.campo.rico.html, hint: c.hint }));
+
         return card;
     });
 }
@@ -1981,7 +2261,8 @@ function converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaInd
     });
 }
 
-function converterNotaClozeAnki(campoTexto, tema, zip, nomeParaIndice) {
+function converterNotaClozeAnki(modelo, flds, idxCampoCloze, tema, zip, nomeParaIndice) {
+    const campoTexto = flds[idxCampoCloze] || "";
     return extrairMidiaDoCampo(campoTexto, zip, nomeParaIndice).then(processado => {
         const semNada = !processado.texto.trim() && processado.imagens.length === 0 && processado.midias.length === 0;
         if (semNada) throw new Error(`Nota cloze sem nenhum conteúdo. Campo original: "${campoTexto.slice(0, 60)}"`);
@@ -1996,6 +2277,28 @@ function converterNotaClozeAnki(campoTexto, tema, zip, nomeParaIndice) {
         };
         aplicarMidiasExtraidasNoCard(card, "Pergunta", processado);
         card._midiaNaoSuportada = processado.midiaNaoSuportada;
+
+        // NOVO: até aqui só o campo com {{c1::...}} é lido — os campos irmãos (ex: Embasamento, ✚ Dica,
+        // ✚ Saiba mais) eram inteiramente ignorados antes, mesmo quando o template do card cloze os
+        // exibia na resposta. Se o afmt do modelo for legível, descobrimos quais campos (fora o de
+        // cloze) aparecem nele e em que ordem, extraindo cada um como HTML rico (mesma função do
+        // pipeline "com template" — ver converterNotaComTemplateAnki) pra exibir na revisão.
+        const nomesCampos = (modelo.flds || []).map(f => f.name);
+        const prep = prepararTemplateAnki(modelo);
+        if (prep && prep.afmt) {
+            const nomeCampoCloze = nomesCampos[idxCampoCloze];
+            const ordemVerso = ordemDosCamposNoTemplate(prep.afmt, nomesCampos).filter(c => c.nome !== nomeCampoCloze);
+            if (ordemVerso.length > 0) {
+                return Promise.all(ordemVerso.map(c => {
+                    const i = nomesCampos.indexOf(c.nome);
+                    return extrairCampoAnkiComoHtml(flds[i] || "", zip, nomeParaIndice).then(r => ({ ...c, r }));
+                })).then(resultados => {
+                    const camposVerso = resultados.filter(x => x.r.temConteudo).map(x => ({ nome: x.nome, html: x.r.html, hint: x.hint }));
+                    if (camposVerso.length > 0) card.camposVerso = camposVerso;
+                    return card;
+                });
+            }
+        }
         return card;
     });
 }
@@ -2228,13 +2531,31 @@ function carregarRevisaoSRS() {
     } else {
         cardAtualRevisao = paraRevisar[0];
         const ehCloze = cardAtualRevisao.tipo === "cloze" && cardAtualRevisao.clozePartes;
-        const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) : escaparComHtmlProtegido(cardAtualRevisao.subtema);
-               const blocoResposta = ehCloze ? "" : `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${cardAtualRevisao.resposta ? escaparComHtmlProtegido(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'}</div>`;
+        // NOVO: quando o card tem HTML rico por campo (camposFrente/camposVerso — ver
+        // converterNotaComTemplateAnki/converterNotaClozeAnki), preferimos exibir ele: preserva
+        // formatação/posição de imagem/tabelas do Anki original, em vez do texto achatado de sempre
+        // (subtema/resposta), mantido só como fallback pra decks já importados antes dessa mudança.
+        const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) :
+            (cardAtualRevisao.camposFrente ? montarCaixasCamposAnki(cardAtualRevisao.camposFrente) : escaparComHtmlProtegido(cardAtualRevisao.subtema));
+        // Cloze só ganha área de resposta separada quando existem campos complementares de verdade
+        // (ex: Embasamento, ✚ Saiba mais) — a resposta da lacuna em si já aparece revelada dentro da
+        // própria pergunta (ver revelarRespostaSRS), então sem camposVerso o comportamento de sempre
+        // (nenhuma área de resposta pro cloze) é mantido.
+        const temAreaResposta = ehCloze ? !!(cardAtualRevisao.camposVerso && cardAtualRevisao.camposVerso.length > 0) : true;
+        const corpoResposta = cardAtualRevisao.camposVerso
+            ? montarCaixasCamposAnki(cardAtualRevisao.camposVerso)
+            : (cardAtualRevisao.resposta ? escaparComHtmlProtegido(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>');
+        const blocoResposta = temAreaResposta ? `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${corpoResposta}</div>` : "";
         areaDisplay.innerHTML = `<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(cardAtualRevisao.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${cardAtualRevisao.intervalo_atual} dias</div>`;;
         controls.classList.add("oculto");
         if (btnRevelar) btnRevelar.classList.remove("oculto");
         feedback.innerText = "Pense na resposta e depois revele.";
         exibirImagensRevisaoAtual(cardAtualRevisao);
+        // As imagens/mídias embutidas no HTML rico (camposFrente/camposVerso) só têm o id do
+        // IndexedDB salvo — a blob URL de exibição precisa ser recriada a cada renderização (ver
+        // resolverMidiaInlineNoContainer).
+        resolverMidiaInlineNoContainer(document.getElementById("srs-pergunta-atual")).then(urls => urlsImagemRevisaoAtual.push(...urls));
+        resolverMidiaInlineNoContainer(document.getElementById("srs-resposta-area")).then(urls => urlsImagemRevisaoAtual.push(...urls));
     }
 }
 
@@ -2249,10 +2570,12 @@ function revelarRespostaSRS() {
             });
             perguntaEl.innerHTML = renderizarPerguntaCloze(cardAtualRevisao, true, respostasDigitadas);
         }
-    } else {
-        const respostaArea = document.getElementById("srs-resposta-area");
-        if (respostaArea) respostaArea.classList.remove("oculto");
     }
+    // NOVO: cloze com campos complementares (ex: Embasamento, ✚ Saiba mais — ver
+    // converterNotaClozeAnki) agora TAMBÉM tem #srs-resposta-area no DOM, então revela ela junto —
+    // antes só o card não-cloze caía aqui (cloze nunca tinha essa área, `if`/`else` eram excludentes).
+    const respostaArea = document.getElementById("srs-resposta-area");
+    if (respostaArea) respostaArea.classList.remove("oculto");
     const btnRevelar = document.getElementById("btn-revelar-resposta");
     if (btnRevelar) btnRevelar.classList.add("oculto");
     document.getElementById("srs-controls").classList.remove("oculto");
