@@ -2327,6 +2327,14 @@ function extrairCampoAnkiComoHtml(campoHtmlBruto, zip, nomeParaIndice) {
                     return salvarImagemSRS(novoId, blob).then(() => { img.setAttribute("data-srs-img-id", novoId); });
                 }).catch(() => { midiaNaoSuportada = true; img.remove(); })
             );
+        } else if (/^https?:\/\//i.test(src)) {
+            // NOVO: alguns decks (comuns em bancos de questão online, ex: QConcursos) usam imagem
+            // "hotlinked" — uma URL externa de verdade — em vez de empacotar o arquivo dentro do
+            // .apkg. O Anki de verdade também só carrega essa imagem direto da internet nesse caso;
+            // antes a gente tratava isso como "mídia não suportada" e removia a imagem, porque só
+            // sabíamos resolver nomes de arquivo local (via nomeParaIndice). Mantemos o <img> apontando
+            // pra essa URL — é só uma requisição normal de imagem, nunca script/execução.
+            img.setAttribute("src", src);
         } else {
             midiaNaoSuportada = true;
             img.remove();
@@ -2432,6 +2440,58 @@ function montarCaixasCamposAnki(campos) {
     }).join("");
 }
 
+// NOVO: monta a interface de múltipla escolha (ver detectarCamposOpcaoMultiplaEscolha) — embaralha a
+// ordem de exibição (igual ao <script> do próprio deck fazia) e dá feedback imediato ao clicar numa
+// opção, tudo em código NOSSO/confiável — o <script> original do deck nunca é executado.
+function renderizarOpcoesMultiplaEscolhaSRS(opcoes) {
+    const embaralhadas = [...opcoes];
+    for (let i = embaralhadas.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [embaralhadas[i], embaralhadas[j]] = [embaralhadas[j], embaralhadas[i]];
+    }
+    let html = `<div class="srs-mcq-opcoes">`;
+    embaralhadas.forEach((opcao, i) => {
+        const letra = String.fromCharCode(97 + i);
+        html += `<label class="srs-mcq-opcao" data-correta="${opcao.correta}" onclick="selecionarOpcaoMultiplaEscolhaSRS(this)"><input type="radio" name="srs-mcq-opcao" style="pointer-events:none;"><span>${letra}) ${opcao.html}</span></label>`;
+    });
+    html += `<div class="srs-mcq-feedback"></div></div>`;
+    return html;
+}
+function selecionarOpcaoMultiplaEscolhaSRS(label) {
+    const container = label.closest(".srs-mcq-opcoes");
+    if (!container) return;
+    container.querySelectorAll(".srs-mcq-opcao").forEach(op => op.classList.remove("srs-mcq-certa", "srs-mcq-errada"));
+    const input = label.querySelector("input");
+    if (input) input.checked = true;
+    const correta = label.dataset.correta === "true";
+    label.classList.add(correta ? "srs-mcq-certa" : "srs-mcq-errada");
+    const feedback = container.querySelector(".srs-mcq-feedback");
+    if (feedback) {
+        feedback.textContent = correta ? "✅ CORRETO!" : "❌ ERRADO!";
+        feedback.style.color = correta ? "var(--secondary-color)" : "var(--danger-color)";
+    }
+}
+
+// NOVO: detecta o padrão de nota "múltipla escolha genérica" comum em decks de banco de questões
+// (ex: templates tipo "Cartão Interativo"/"Questão Universal") — vários campos nomeados
+// Opção1/Opção2/.../Alternativa1/... escondidos no template via display:none, com um <script>
+// embutido que monta a interface de seleção. A gente NUNCA executa esse script (mesmo motivo de
+// sempre — é um app que guarda dados financeiros do usuário no mesmo navegador), então sem essa
+// detecção o card virava uma lista de caixas soltas, sem nenhuma organização de múltipla escolha,
+// bem diferente do que o Anki mostraria. Retorna os nomes dos campos de opção, em ordem numérica, ou
+// null se o modelo não tiver esse padrão (2+ campos batendo o nome).
+function detectarCamposOpcaoMultiplaEscolha(nomesCampos) {
+    const regexOpcao = /^(op[cç][aã]o|alternativa|option)\s*0*(\d+)$/i;
+    const encontrados = [];
+    nomesCampos.forEach(nome => {
+        const m = nome.match(regexOpcao);
+        if (m) encontrados.push({ nome, numero: parseInt(m[2], 10) });
+    });
+    if (encontrados.length < 2) return null;
+    encontrados.sort((a, b) => a.numero - b.numero);
+    return encontrados.map(e => e.nome);
+}
+
 function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaIndice) {
     const nomesCampos = (modelo.flds || []).map(f => f.name);
     // Extrai mídia/texto de CADA CAMPO isoladamente primeiro (exatamente como já fazíamos pra decks
@@ -2461,7 +2521,13 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         resultadosPorCampo.forEach(r => {
             if (prep.camposFrente.has(r.nome)) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); }
             if (prep.camposVerso.has(r.nome)) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); }
-            if (r.midiaNaoSuportada) midiaNaoSuportada = true;
+            // NOVO: só conta como "mídia não suportada" de verdade quando os DOIS pipelines falham em
+            // resolver — o antigo (extrairMidiaDoCampo, ainda usado pro texto achatado/compatibilidade)
+            // e o novo (extrairCampoAnkiComoHtml, o que realmente aparece na tela). Ex: imagem
+            // hospedada externamente (URL http/https) — o pipeline novo já sabe exibir direto (ver
+            // extrairCampoAnkiComoHtml), então não é mais um problema de verdade, mesmo o antigo ainda
+            // não sabendo lidar com isso (ele só afeta texto de busca/compatibilidade, não a exibição).
+            if (r.midiaNaoSuportada && r.rico.midiaNaoSuportada) midiaNaoSuportada = true;
         });
 
         const frenteVazia = !frenteHtml.trim() && imagensFrente.length === 0 && midiasFrente.length === 0;
@@ -2482,10 +2548,33 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         // campo (preserva formatação, imagem POSICIONADA no lugar certo, tabelas etc.), na mesma ordem
         // visual do template original — usado pela tela de revisão quando disponível (ver
         // carregarRevisaoSRS/montarCaixasCamposAnki).
+        const ordemAfmt = ordemDosCamposNoTemplate(prep.afmt, nomesCampos);
+
+        // NOVO: se o modelo tem o padrão de múltipla escolha (ver detectarCamposOpcaoMultiplaEscolha),
+        // esses campos ganham uma interface própria de seleção (ver renderizarOpcoesMultiplaEscolhaSRS)
+        // em vez de virarem caixas soltas sem organização nenhuma. A "resposta certa" é o(s) campo(s)
+        // de opção que o próprio afmt referencia — é assim que o template original revela o gabarito
+        // (ex: "GABARITO: {{Opcao1}}"), então não precisamos adivinhar nem depender de um nome de
+        // campo fixo tipo "Opcao1" — funciona igual pra qualquer convenção de nome/ordem do deck.
+        const camposOpcao = detectarCamposOpcaoMultiplaEscolha(nomesCampos);
+        const nomesOpcoesCorretas = camposOpcao ? camposOpcao.filter(nome => ordemAfmt.some(o => o.nome === nome)) : [];
+        const ehMultiplaEscolha = camposOpcao && nomesOpcoesCorretas.length > 0;
+        if (ehMultiplaEscolha) {
+            card.opcoesMultiplaEscolha = camposOpcao
+                .map(nome => ({ nome, campo: campos[nome] }))
+                .filter(c => c.campo && c.campo.rico.temConteudo)
+                .map(c => ({ nome: c.nome, html: c.campo.rico.html, correta: nomesOpcoesCorretas.includes(c.nome) }));
+        }
+        // Campos de opção já viram a interface especial acima — excluídos das caixas genéricas pra não
+        // duplicar (uma vez como opção clicável, outra vez como caixa solta).
+        const camposParaExcluirDasCaixas = ehMultiplaEscolha ? new Set(camposOpcao) : new Set();
+
         const camposFrenteRicos = ordemDosCamposNoTemplate(prep.qfmt, nomesCampos)
+            .filter(c => !camposParaExcluirDasCaixas.has(c.nome))
             .map(c => ({ ...c, campo: campos[c.nome] }))
             .filter(c => c.campo && c.campo.rico.temConteudo);
-        const camposVersoRicos = ordemDosCamposNoTemplate(prep.afmt, nomesCampos)
+        const camposVersoRicos = ordemAfmt
+            .filter(c => !camposParaExcluirDasCaixas.has(c.nome))
             .map(c => ({ ...c, campo: campos[c.nome] }))
             .filter(c => c.campo && c.campo.rico.temConteudo);
         if (camposFrenteRicos.length > 0) card.camposFrente = camposFrenteRicos.map(c => ({ nome: c.nome, html: c.campo.rico.html, hint: c.hint }));
@@ -2566,6 +2655,12 @@ function converterNotaClozeAnki(modelo, flds, idxCampoCloze, tema, zip, nomePara
                 })).then(resultados => {
                     const camposVerso = resultados.filter(x => x.r.temConteudo).map(x => ({ nome: x.nome, html: x.r.html, hint: x.hint }));
                     if (camposVerso.length > 0) card.camposVerso = camposVerso;
+                    // NOVO: esses campos irmãos só passam pelo pipeline novo (extrairCampoAnkiComoHtml,
+                    // sem equivalente antigo pra comparar) — diferente do caso de converterNotaComTemplateAnki,
+                    // aqui não existe um 2º pipeline "sucesso" pra checar antes de avisar, então qualquer
+                    // falha real dele (ex: mídia referenciada que não existe no zip nem é URL http/https)
+                    // já é motivo suficiente pra somar ao aviso, senão a falha fica muda pro usuário.
+                    if (resultados.some(x => x.r.midiaNaoSuportada)) card._midiaNaoSuportada = true;
                     return card;
                 });
             }
@@ -2803,20 +2898,30 @@ function renderizarCardNaAreaRevisao(card) {
     if (!areaDisplay) return;
 
     const ehCloze = card.tipo === "cloze" && card.clozePartes;
+    // NOVO: cards de múltipla escolha auto-detectados (ver detectarCamposOpcaoMultiplaEscolha) ganham
+    // a interface própria de seleção, junto com as outras caixas normais do lado da pergunta.
+    const ehMultiplaEscolha = !!(card.opcoesMultiplaEscolha && card.opcoesMultiplaEscolha.length > 0);
     // NOVO: quando o card tem HTML rico por campo (camposFrente/camposVerso — ver
     // converterNotaComTemplateAnki/converterNotaClozeAnki), preferimos exibir ele: preserva
     // formatação/posição de imagem/tabelas do Anki original, em vez do texto achatado de sempre
     // (subtema/resposta), mantido só como fallback pra decks já importados antes dessa mudança.
     const perguntaHtml = ehCloze ? renderizarPerguntaCloze(card, false) :
-        (card.camposFrente ? montarCaixasCamposAnki(card.camposFrente) : escaparComHtmlProtegido(card.subtema));
+        (card.camposFrente ? montarCaixasCamposAnki(card.camposFrente) : escaparComHtmlProtegido(card.subtema)) +
+        (ehMultiplaEscolha ? renderizarOpcoesMultiplaEscolhaSRS(card.opcoesMultiplaEscolha) : "");
     // Cloze só ganha área de resposta separada quando existem campos complementares de verdade
     // (ex: Embasamento, ✚ Saiba mais) — a resposta da lacuna em si já aparece revelada dentro da
     // própria pergunta (ver revelarRespostaSRS), então sem camposVerso o comportamento de sempre
     // (nenhuma área de resposta pro cloze) é mantido.
     const temAreaResposta = ehCloze ? !!(card.camposVerso && card.camposVerso.length > 0) : true;
-    const corpoResposta = card.camposVerso
-        ? montarCaixasCamposAnki(card.camposVerso)
-        : (card.resposta ? escaparComHtmlProtegido(card.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>');
+    // NOVO: pra múltipla escolha, o "gabarito" nunca é só a caixa crua do campo — o template original
+    // sempre rotulava ele (ex: "GABARITO: {{Opcao1}}"), texto que se perde na extração por campo (só
+    // pegamos o valor do campo referenciado, não o texto ao redor dele no template). Sintetizamos um
+    // rótulo próprio ("Resposta correta:") em vez de deixar o valor solto sem contexto nenhum.
+    const corpoResposta = ehMultiplaEscolha
+        ? `<div class="srs-campo-caixa srs-mcq-gabarito">✅ Resposta correta: <b>${card.opcoesMultiplaEscolha.filter(o => o.correta).map(o => o.html).join(" / ")}</b></div>${card.camposVerso ? montarCaixasCamposAnki(card.camposVerso) : ""}`
+        : (card.camposVerso
+            ? montarCaixasCamposAnki(card.camposVerso)
+            : (card.resposta ? escaparComHtmlProtegido(card.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'));
     const blocoResposta = temAreaResposta ? `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${corpoResposta}</div>` : "";
     const avisoPreview = modoPreviewSRS ? `<div class="srs-preview-banner">🔍 Pré-visualização — não conta para o histórico de revisões <button onclick="sairDoPreviewSRS()">Voltar para a fila</button></div>` : "";
     areaDisplay.innerHTML = `${avisoPreview}<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(card.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${card.intervalo_atual} dias</div>`;

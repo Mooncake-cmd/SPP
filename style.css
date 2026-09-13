@@ -1063,6 +1063,53 @@ button:hover { filter: brightness(0.9); }
     padding: 4px 8px;
 }
 
+/* NOVO: interface de múltipla escolha auto-detectada (ver detectarCamposOpcaoMultiplaEscolha /
+   renderizarOpcoesMultiplaEscolhaSRS) — reproduz a experiência de clicar numa alternativa e ver
+   feedback na hora, sem executar nenhum script do deck original. */
+.srs-mcq-opcoes {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+    text-align: left;
+}
+.srs-mcq-opcao {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    background: #ffffff;
+    color: #1a1a1a;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: normal;
+    transition: border-color 0.15s;
+}
+.srs-mcq-opcao:hover {
+    border-color: var(--secondary-color);
+}
+.srs-mcq-opcao input {
+    margin-top: 3px;
+    flex-shrink: 0;
+}
+.srs-mcq-opcao.srs-mcq-certa {
+    border-color: var(--secondary-color);
+    background: #e3f2fd;
+}
+.srs-mcq-opcao.srs-mcq-errada {
+    border-color: var(--danger-color);
+    background: #ffebee;
+}
+.srs-mcq-feedback {
+    font-weight: bold;
+    margin-top: 4px;
+    min-height: 1.2em;
+}
+.srs-mcq-gabarito {
+    border: 1px solid var(--secondary-color);
+}
+
 /* NOVO: pré-visualização de um card específico (furando a fila, a partir do "Deck Completo") — ver
    visualizarCardSRS/sairDoPreviewSRS. O aviso deixa claro que essa exibição não tem validade nenhuma
    pro histórico/agendamento (ver processarRevisaoSRS), pra não ser confundida com uma revisão real. */
