@@ -2427,7 +2427,11 @@ function converterNotaClozeAnki(modelo, flds, idxCampoCloze, tema, zip, nomePara
 
 function parsearClozeAnki(texto) {
     const segmentos = [];
-    const regex = /\{\{c\d+::(.*?)(?:::.*?)?\}\}/g;
+    // NOVO: flag "s" (dotAll) — sem ela, "." não casa quebra de linha, então uma lacuna cuja resposta
+    // tem uma quebra de linha no meio (ex: "{{c1::cento<br>e vinte}}", já virou "\n" antes de chegar
+    // aqui — ver converterHtmlParaTextoPlano) nunca era encontrada pelo regex, e o card era rejeitado
+    // inteiro como "sem nenhuma lacuna válida", mesmo tendo uma de verdade.
+    const regex = /\{\{c\d+::(.*?)(?:::.*?)?\}\}/gs;
     let ultimoIndice = 0, match;
     while ((match = regex.exec(texto)) !== null) {
         if (match.index > ultimoIndice) segmentos.push({ texto: texto.slice(ultimoIndice, match.index), lacuna: false });
@@ -2435,7 +2439,13 @@ function parsearClozeAnki(texto) {
         ultimoIndice = regex.lastIndex;
     }
     if (ultimoIndice < texto.length) segmentos.push({ texto: texto.slice(ultimoIndice), lacuna: false });
-    return segmentos.filter(s => s.texto !== "");
+    // NOVO: uma lacuna "{{c1::}}" (sem nada entre os ::) é uma resposta legítima e proposital no Anki
+    // — decks de regência verbal/gramática usam isso pra testar quando a resposta certa é "nada"/"sem
+    // preposição" (ex: campo de opções "a / à / (sem nada) / em"). Só descarta segmento vazio quando
+    // ele NÃO é lacuna (texto de fora do {{...}} realmente vazio, sem significado nenhum) — descartar
+    // TODA lacuna vazia (como antes) fazia esses cards serem rejeitados como "sem nenhuma lacuna
+    // válida", mesmo tendo uma de verdade só que com resposta vazia.
+    return segmentos.filter(s => s.lacuna || s.texto !== "");
 }
 
 // NOVO: converte um trecho de HTML (já sem as imagens/áudios, que foram extraídos à parte) em texto
