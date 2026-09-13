@@ -988,14 +988,15 @@ button:hover { filter: brightness(0.9); }
 .srs-hint-anki {
     margin-top: 8px;
     padding: 8px 10px;
-    background: var(--table-header-bg);
+    background: #ffffff;
+    color: #1a1a1a;
     border: 1px solid var(--border-color);
     border-radius: 8px;
 }
 .srs-hint-anki summary {
     cursor: pointer;
     font-weight: bold;
-    color: var(--secondary-color);
+    color: #1565c0;
 }
 .srs-hint-anki[open] summary {
     margin-bottom: 6px;
@@ -1004,11 +1005,18 @@ button:hover { filter: brightness(0.9); }
 /* NOVO: caixa por campo do HTML rico importado do Anki (ver camposFrente/camposVerso) — cada campo do
    template original (ex: Afirmação, Embasamento) vira uma caixa separada, igual ao Anki organiza a
    resposta em mais de um bloco. Sem rótulo de nome de propósito: o Anki também não mostra o nome do
-   campo, só o conteúdo. */
+   campo, só o conteúdo.
+   Fundo BRANCO fixo (não segue --table-header-bg do tema) de propósito: o HTML vem direto do deck
+   original do Anki, que costuma ter cor de texto fixa (ex: "color: rgb(41,44,47)") pensada pra um
+   fundo claro — herdada de quem criou o deck num editor visual, não do nosso tema. É o mesmo
+   comportamento do Anki/AnkiDroid: eles também não escurecem o conteúdo do card no modo escuro a
+   menos que o próprio deck tenha CSS pra isso — sem essa cor fixa aqui, texto escuro em cima do nosso
+   fundo escuro ficava praticamente invisível (só aparecia ao selecionar o texto). */
 .srs-campo-caixa {
     margin-top: 8px;
     padding: 8px 10px;
-    background: var(--table-header-bg);
+    background: #ffffff;
+    color: #1a1a1a;
     border-radius: 8px;
     text-align: left;
 }

@@ -753,7 +753,13 @@ function aplicarTema() {
         if(meuRadarChart) { meuRadarChart.options.scales.r.pointLabels.font.color = '#666'; meuRadarChart.options.scales.r.grid.color = '#ddd'; meuRadarChart.update(); } 
     }
 }
-function alternarTema() { dados.tema = dados.tema === 'claro' ? 'escuro' : 'claro'; aplicarTema(); if (leitorEpubRendition) aplicarTemaEpub(leitorEpubRendition); salvar(); atualizarGraficoRadar(); atualizarGraficoHistorico(); atualizarGraficoMaterias(); }
+// NOVO: trocar de tema é uma mudança puramente visual (CSS, já aplicada por aplicarTema() — o resto
+// da tela reage sozinha via variável CSS). Antes isso chamava salvar(), que dispara atualizar() e
+// reconstrói o app INTEIRO — checklist, biblioteca, finanças e a lista completa de SRS, incluindo
+// milhares de cards num deck grande — só pra trocar uma cor. Em decks grandes isso bloqueava a aba
+// tempo suficiente pro navegador mostrar o aviso de "página não está respondendo". salvarDados()
+// persiste a preferência sem refazer esse trabalho todo.
+function alternarTema() { dados.tema = dados.tema === 'claro' ? 'escuro' : 'claro'; aplicarTema(); if (leitorEpubRendition) aplicarTemaEpub(leitorEpubRendition); salvarDados(); atualizarGraficoRadar(); atualizarGraficoHistorico(); atualizarGraficoMaterias(); }
 function salvarPreferenciasTimer() { dados.configTimer = { som: document.getElementById("select-som").value, notificacao: document.getElementById("check-notificacao").checked, mostrarPrevisao: document.getElementById("check-previsao").checked }; salvar(); calcularPrevisaoTermino(); }
 function carregarPreferenciasTimer() {
     if (dados.configTimer) { document.getElementById("select-som").value = dados.configTimer.som || 'sino'; document.getElementById("check-notificacao").checked = dados.configTimer.notificacao || false; document.getElementById("check-previsao").checked = dados.configTimer.mostrarPrevisao !== false; }
@@ -1471,23 +1477,32 @@ function exibirListaMidiasRevisao(itens, elId) {
 function exibirImagensRevisaoAtual(item) {
     if (!item) return;
 
-    const idsImagemPergunta = [item.imagemPerguntaId, ...(item.imagensExtrasPerguntaIds || [])].filter(Boolean);
-    exibirListaImagensRevisao(idsImagemPergunta, "srs-imagem-pergunta-atual", "Imagem da pergunta");
+    // NOVO: quando o lado tem HTML rico (camposFrente/camposVerso), as imagens/mídias desse lado já
+    // aparecem embutidas no próprio texto, na posição certa (ver resolverMidiaInlineNoContainer) —
+    // mostrar de novo aqui duplicava tudo (um card chegava a mostrar a mesma imagem repetida em bloco
+    // à parte). Só mostra o bloco genérico pra um lado quando ele NÃO tem HTML rico (cards antigos, ou
+    // a pergunta de um cloze — que nunca tem camposFrente, só camposVerso quando há campos extras).
+    if (!item.camposFrente) {
+        const idsImagemPergunta = [item.imagemPerguntaId, ...(item.imagensExtrasPerguntaIds || [])].filter(Boolean);
+        exibirListaImagensRevisao(idsImagemPergunta, "srs-imagem-pergunta-atual", "Imagem da pergunta");
 
-    const idsImagemResposta = [item.imagemRespostaId, ...(item.imagensExtrasRespostaIds || [])].filter(Boolean);
-    exibirListaImagensRevisao(idsImagemResposta, "srs-imagem-resposta-atual", "Imagem da resposta");
+        const midiasPergunta = [
+            item.midiaPerguntaId ? { id: item.midiaPerguntaId, tipo: item.midiaPerguntaTipo } : null,
+            ...(item.midiasExtrasPerguntaIds || [])
+        ].filter(Boolean);
+        exibirListaMidiasRevisao(midiasPergunta, "srs-midia-pergunta-atual");
+    }
 
-    const midiasPergunta = [
-        item.midiaPerguntaId ? { id: item.midiaPerguntaId, tipo: item.midiaPerguntaTipo } : null,
-        ...(item.midiasExtrasPerguntaIds || [])
-    ].filter(Boolean);
-    exibirListaMidiasRevisao(midiasPergunta, "srs-midia-pergunta-atual");
+    if (!item.camposVerso) {
+        const idsImagemResposta = [item.imagemRespostaId, ...(item.imagensExtrasRespostaIds || [])].filter(Boolean);
+        exibirListaImagensRevisao(idsImagemResposta, "srs-imagem-resposta-atual", "Imagem da resposta");
 
-    const midiasResposta = [
-        item.midiaRespostaId ? { id: item.midiaRespostaId, tipo: item.midiaRespostaTipo } : null,
-        ...(item.midiasExtrasRespostaIds || [])
-    ].filter(Boolean);
-    exibirListaMidiasRevisao(midiasResposta, "srs-midia-resposta-atual");
+        const midiasResposta = [
+            item.midiaRespostaId ? { id: item.midiaRespostaId, tipo: item.midiaRespostaTipo } : null,
+            ...(item.midiasExtrasRespostaIds || [])
+        ].filter(Boolean);
+        exibirListaMidiasRevisao(midiasResposta, "srs-midia-resposta-atual");
+    }
 }
 
 // ============================================================
@@ -1704,7 +1719,12 @@ function decodificarCamposProtobuf(bytes, camposString, camposVarint) {
 function construirDecksSchemaNovo(db) {
     const decksJson = {};
     const linhas = db.exec("SELECT id, name FROM decks");
-    if (linhas.length) linhas[0].values.forEach(([id, name]) => { decksJson[String(id)] = { name }; });
+    // NOVO: no schema 18, o nome do deck usa o caractere de controle \x1f (unit separator) como
+    // separador de hierarquia entre deck pai e subdeck, em vez de "::" como nas exportações antigas
+    // (JSON de col.decks). Convertemos aqui pra bater com o que o resto do app já espera (ver
+    // construirArvoreTemas, "separador '::'") — sem isso, a árvore de temas tratava o nome inteiro
+    // como um único tema achatado (com os \x1f aparecendo como caracteres estranhos no meio do texto).
+    if (linhas.length) linhas[0].values.forEach(([id, name]) => { decksJson[String(id)] = { name: name.replace(/\x1f/g, "::") }; });
     return decksJson;
 }
 
@@ -1747,6 +1767,28 @@ function construirModelosSchemaNovo(db) {
     return modelsJson;
 }
 
+// Detecta o "magic number" padrão de um frame zstd (os 4 bytes 28 B5 2F FD) — usado em vários pontos
+// da importação do Anki, porque exportações mais recentes (2.1.50+) comprimem em zstd não só o
+// media/collection.anki21b, mas também, em algumas versões, cada arquivo de mídia individualmente
+// (ver descomprimirBlobSeZstd).
+function ehBytesZstd(bytes) {
+    return bytes.length >= 4 && bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd;
+}
+
+// NOVO: em algumas exportações do Anki, cada arquivo de mídia (imagem, áudio) dentro do .apkg também
+// vem comprimido em zstd individualmente — não só o media/collection.anki21b, já tratados. Detecta
+// pelo magic number e descomprime antes de salvar; sem isso, o blob salvo era o zstd cru, que o
+// navegador não consegue decodificar como imagem/áudio (a imagem simplesmente não aparecia, sem erro
+// nenhum no console — só carregava com 0x0 de dimensão).
+function descomprimirBlobSeZstd(blob) {
+    return blob.arrayBuffer().then(buffer => {
+        const bytes = new Uint8Array(buffer);
+        if (!ehBytesZstd(bytes)) return blob;
+        const descomprimido = fzstd.decompress(bytes);
+        return new Blob([descomprimido], { type: blob.type || "application/octet-stream" });
+    });
+}
+
 function processarImportacaoApkg(arquivo) {
     const resumo = { sucesso: 0, midiaNaoSuportada: 0, falhas: 0, exemplosFalha: [] };
 
@@ -1758,12 +1800,10 @@ function processarImportacaoApkg(arquivo) {
             } catch (e) {
                 // NOVO: no formato novo do Anki (2.1.50+), o "media" não é só o protobuf MediaEntries
                 // cru — em exportações mais recentes ele também vem comprimido em zstd, igual ao
-                // collection.anki21b (ver mais abaixo). Detecta pelo "magic number" padrão de um frame
-                // zstd (os 4 bytes 28 B5 2F FD) antes de descomprimir — sem isso, tentávamos decodificar
+                // collection.anki21b (ver mais abaixo). Sem descomprimir primeiro, tentávamos decodificar
                 // como protobuf os bytes ainda comprimidos, o que sempre falhava ("wire type não
                 // suportado") por não ser protobuf válido, só lixo binário comprimido.
-                const ehZstd = bytes.length >= 4 && bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd;
-                const bytesProtobuf = ehZstd ? fzstd.decompress(bytes) : bytes;
+                const bytesProtobuf = ehBytesZstd(bytes) ? fzstd.decompress(bytes) : bytes;
                 return decodificarMediaEntriesProtobuf(bytesProtobuf);
             }
         }) : Promise.resolve({});
@@ -2173,7 +2213,7 @@ function extrairCampoAnkiComoHtml(campoHtmlBruto, zip, nomeParaIndice) {
         const indice = nomeParaIndice[src];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
                     const novoId = `anki_img_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
                     return salvarImagemSRS(novoId, blob).then(() => { img.setAttribute("data-srs-img-id", novoId); });
                 }).catch(() => { midiaNaoSuportada = true; img.remove(); })
@@ -2192,7 +2232,7 @@ function extrairCampoAnkiComoHtml(campoHtmlBruto, zip, nomeParaIndice) {
         const indice = nomeParaIndice[nomeArquivo];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
                     const novoId = `anki_midia_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
                     return salvarImagemSRS(novoId, blob).then(() => {
                         span.setAttribute("data-srs-midia-id", novoId);
@@ -2487,7 +2527,7 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
         const indice = nomeParaIndice[src];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
                     const novoId = `anki_img_${Date.now()}_${Math.floor(Math.random() * 1000000)}_${posicao}`;
                     return salvarImagemSRS(novoId, blob).then(() => { imagensPorPosicao[posicao] = novoId; });
                 }).catch(() => { midiaNaoSuportada = true; })
@@ -2506,7 +2546,7 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
         const indice = nomeParaIndice[nomeArquivo];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
                     const novoId = `anki_midia_${Date.now()}_${Math.floor(Math.random() * 1000000)}_${posicao}`;
                     return salvarImagemSRS(novoId, blob).then(() => { midiasPorPosicao[posicao] = { id: novoId, tipo: tipo }; });
                 }).catch(() => { midiaNaoSuportada = true; })
