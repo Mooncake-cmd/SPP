@@ -2366,7 +2366,13 @@ function extrairCampoAnkiComoHtml(campoHtmlBruto, zip, nomeParaIndice) {
     return Promise.all(tarefas).then(() => {
         const html = doc.body.innerHTML.trim();
         const texto = (doc.body.textContent || "").trim();
-        const temMidia = !!(doc.body.querySelector("img[data-srs-img-id]") || doc.body.querySelector("[data-srs-midia-id]"));
+        // NOVO: "tem mídia" precisa contar tanto a imagem/mídia empacotada no .apkg (ainda sem src de
+        // verdade aqui — só ganha um data-srs-img-id, resolvido depois em resolverMidiaInlineNoContainer)
+        // quanto a imagem hospedada externamente (já ganhou o "src" de verdade acima, ver comentário na
+        // URL http/https). Sem contar a segunda, um campo cujo ÚNICO conteúdo é uma imagem externa (sem
+        // nenhum texto) virava "temConteudo: false" mesmo com o <img> funcionando de verdade no html —
+        // fazendo o card inteiro ser rejeitado como "sem nenhum conteúdo depois de renderizar o template".
+        const temMidia = !!(doc.body.querySelector("img[data-srs-img-id], img[src]") || doc.body.querySelector("[data-srs-midia-id]"));
         return { html, texto, temConteudo: !!(texto || temMidia), midiaNaoSuportada };
     });
 }
@@ -2518,9 +2524,10 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
 
         const imagensFrente = [], midiasFrente = [], imagensVerso = [], midiasVerso = [];
         let midiaNaoSuportada = false;
+        let frenteTemConteudoRico = false, versoTemConteudoRico = false;
         resultadosPorCampo.forEach(r => {
-            if (prep.camposFrente.has(r.nome)) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); }
-            if (prep.camposVerso.has(r.nome)) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); }
+            if (prep.camposFrente.has(r.nome)) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); if (r.rico.temConteudo) frenteTemConteudoRico = true; }
+            if (prep.camposVerso.has(r.nome)) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); if (r.rico.temConteudo) versoTemConteudoRico = true; }
             // NOVO: só conta como "mídia não suportada" de verdade quando os DOIS pipelines falham em
             // resolver — o antigo (extrairMidiaDoCampo, ainda usado pro texto achatado/compatibilidade)
             // e o novo (extrairCampoAnkiComoHtml, o que realmente aparece na tela). Ex: imagem
@@ -2530,8 +2537,16 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
             if (r.midiaNaoSuportada && r.rico.midiaNaoSuportada) midiaNaoSuportada = true;
         });
 
-        const frenteVazia = !frenteHtml.trim() && imagensFrente.length === 0 && midiasFrente.length === 0;
-        const versoVazio = !versoHtml.trim() && imagensVerso.length === 0 && midiasVerso.length === 0;
+        // NOVO: um lado pode parecer "vazio" só pro pipeline antigo (texto achatado + mídia extraída
+        // só de arquivo dentro do .apkg) e mesmo assim ter conteúdo de verdade pelo pipeline novo — o
+        // caso real é um campo cujo ÚNICO conteúdo é uma imagem hospedada externamente (não empacotada
+        // no .apkg): o antigo não sabe resolver isso e descarta a imagem da contagem, mas o novo
+        // (extrairCampoAnkiComoHtml) já sabe exibir direto pela URL. Um lado que é só uma imagem assim
+        // (comum em decks de diagramas/mapas baixados de bancos de questão) não pode ser rejeitado como
+        // "sem conteúdo" só por essa limitação do pipeline antigo — mesma lógica já usada pra imagem
+        // empacotada normal (ver comentário de aplicarMidiasExtraidasNoCard).
+        const frenteVazia = !frenteHtml.trim() && imagensFrente.length === 0 && midiasFrente.length === 0 && !frenteTemConteudoRico;
+        const versoVazio = !versoHtml.trim() && imagensVerso.length === 0 && midiasVerso.length === 0 && !versoTemConteudoRico;
         if (frenteVazia || versoVazio) throw new Error(`Frente ou Verso sem nenhum conteúdo depois de renderizar o template do Anki (modelo "${modelo.name || "sem nome"}"). Frente: "${frenteHtml.slice(0, 60)}" | Verso: "${versoHtml.slice(0, 60)}"`);
 
         const card = {
