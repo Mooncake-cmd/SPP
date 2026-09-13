@@ -1384,6 +1384,14 @@ function excluirMidiasDoCardSRS(card) {
     return Promise.all(todosIdsMidiaDoCardSRS(card).map(id => excluirImagemSRS(id).catch(() => {})));
 }
 
+// NOVO: remove do histórico de revisões (dados.srsRevisoesLog) as entradas de cards que acabaram de
+// ser excluídos — sem isso, ficavam "órfãs" (apontando pra um cardId que não existe mais) pra sempre,
+// inflando o backup à toa e distorcendo qualquer estatística futura que olhe o log inteiro sem
+// filtrar por cards existentes (ex: o FSRS, que usa esse log como base de treino — ver CLAUDE.md).
+function removerEntradasLogSRS(idsExcluidos) {
+    dados.srsRevisoesLog = dados.srsRevisoesLog.filter(r => !idsExcluidos.has(r.cardId));
+}
+
 // NOVO: exclui um tema inteiro (e, por causa da hierarquia "::", todos os subtemas dele também) junto
 // com TODOS os cards que pertencem a ele — antes só dava pra excluir card por card.
 function excluirTema(caminho) {
@@ -1409,6 +1417,7 @@ function excluirTema(caminho) {
             )).finally(() => {
                 const idsParaExcluir = new Set(cardsAlvo.map(c => c.id));
                 dados.srsItems = dados.srsItems.filter(i => !idsParaExcluir.has(i.id));
+                removerEntradasLogSRS(idsParaExcluir);
                 srsNosExpandidos.delete(caminho);
                 srsItemsAlterado = true;
                 salvar();
@@ -1523,6 +1532,7 @@ function confirmarExclusaoTemasSelecionadosSRS() {
             )).finally(() => {
                 const idsParaExcluir = new Set(cardsAlvo.map(c => c.id));
                 dados.srsItems = dados.srsItems.filter(i => !idsParaExcluir.has(i.id));
+                removerEntradasLogSRS(idsParaExcluir);
                 temasSelecionados.forEach(caminho => srsNosExpandidos.delete(caminho));
                 srsItemsAlterado = true;
                 srsTemasParaExcluir = new Set();
@@ -2953,6 +2963,7 @@ function removerCardSRS(id) {
     const card = dados.srsItems.find(i => i.id === id);
     Promise.resolve(card ? excluirMidiasDoCardSRS(card) : null).finally(() => {
         dados.srsItems = dados.srsItems.filter(i => i.id !== id);
+        removerEntradasLogSRS(new Set([id]));
         srsItemsAlterado = true;
         salvar();
     });
