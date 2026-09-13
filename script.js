@@ -1435,6 +1435,105 @@ function atualizarBotaoResumoSRS() {
     else btn.innerText = `🗂️ ${selecionados}/${total} temas selecionados`;
 }
 
+// NOVO: exclusão de VÁRIOS temas de uma vez — antes só dava pra excluir um tema por vez (🗑️ na árvore
+// de "Escolher Temas"), cada um com sua própria confirmação. Reaproveita a mesma árvore hierárquica
+// (arvoreTemasSRS/coletarCaminhosReais) e o mesmo fluxo de exclusão em lote de excluirTema (limpar
+// mídia de cada card, barra de progresso, um salvar() só no final) — só que operando sobre a UNIÃO de
+// todos os temas marcados, com uma confirmação e um progresso só pro lote inteiro. Tem seu próprio
+// Set de seleção (srsTemasParaExcluir), independente de srsTemasSelecionados (que é o filtro de quais
+// temas entram na revisão) — marcar um tema pra excluir aqui não mexe no filtro de revisão.
+let srsTemasParaExcluir = new Set();
+
+function estadoNoTemaExcluir(node) {
+    const reais = coletarCaminhosReais(node);
+    if (reais.length === 0) return 'desmarcado';
+    const marcados = reais.filter(c => srsTemasParaExcluir.has(c)).length;
+    if (marcados === 0) return 'desmarcado';
+    if (marcados === reais.length) return 'marcado';
+    return 'indeterminado';
+}
+function renderizarNoTemaExcluirHTML(node) {
+    const estado = estadoNoTemaExcluir(node);
+    const temFilhos = Object.keys(node.filhos).length > 0;
+    const expandido = srsNosExpandidos.has(node.caminho); // reaproveita o mesmo estado de expandido/recolhido da outra árvore
+    const seta = temFilhos
+        ? `<span class="srs-arvore-seta" onclick="alternarExpansaoTemaExcluir('${node.caminho}', event)">${expandido ? '▾' : '▸'}</span>`
+        : `<span class="srs-arvore-seta-vazia"></span>`;
+    let html = `<li class="srs-arvore-item"><div class="srs-arvore-linha"><label class="srs-arvore-label">${seta}<input type="checkbox" ${estado === 'marcado' ? 'checked' : ''} ${estado === 'indeterminado' ? 'data-indeterminado="true"' : ''} onclick="alternarSelecaoTemaExcluir('${node.caminho}')"><span>${escaparHtml(node.nome)}</span></label></div>`;
+    if (temFilhos) {
+        html += `<ul class="srs-arvore-filhos ${expandido ? '' : 'oculto'}">`;
+        Object.values(node.filhos).sort((a,b) => a.nome.localeCompare(b.nome)).forEach(filho => { html += renderizarNoTemaExcluirHTML(filho); });
+        html += `</ul>`;
+    }
+    html += `</li>`;
+    return html;
+}
+function renderizarArvoreTemasExcluirSRS() {
+    const container = document.getElementById("srs-arvore-temas-excluir");
+    if (!container) return;
+    arvoreTemasSRS = construirArvoreTemas([...srsTemasConhecidos]);
+    if (srsTemasConhecidos.size === 0) { container.innerHTML = "<p class='biblioteca-vazio'>Nenhum tema cadastrado ainda.</p>"; return; }
+    let html = "<ul class='srs-arvore-raiz'>";
+    Object.values(arvoreTemasSRS).sort((a,b) => a.nome.localeCompare(b.nome)).forEach(node => { html += renderizarNoTemaExcluirHTML(node); });
+    html += "</ul>";
+    container.innerHTML = html;
+    container.querySelectorAll('input[data-indeterminado="true"]').forEach(el => { el.indeterminate = true; });
+}
+function alternarExpansaoTemaExcluir(caminho, event) {
+    event.stopPropagation();
+    if (srsNosExpandidos.has(caminho)) srsNosExpandidos.delete(caminho); else srsNosExpandidos.add(caminho);
+    renderizarArvoreTemasExcluirSRS();
+}
+function alternarSelecaoTemaExcluir(caminho) {
+    const node = encontrarNoPorCaminho(arvoreTemasSRS, caminho);
+    if (!node) return;
+    const marcarTudo = estadoNoTemaExcluir(node) !== 'marcado';
+    coletarCaminhosReais(node).forEach(c => { if (marcarTudo) srsTemasParaExcluir.add(c); else srsTemasParaExcluir.delete(c); });
+    renderizarArvoreTemasExcluirSRS();
+}
+function marcarTodosTemasParaExcluir() { srsTemasParaExcluir = new Set(srsTemasConhecidos); renderizarArvoreTemasExcluirSRS(); }
+function limparTodosTemasParaExcluir() { srsTemasParaExcluir = new Set(); renderizarArvoreTemasExcluirSRS(); }
+function abrirModalExcluirTemasSRS() {
+    srsTemasParaExcluir = new Set();
+    renderizarArvoreTemasExcluirSRS();
+    document.getElementById("srs-excluir-temas-modal").classList.remove("modal-oculto");
+}
+function fecharModalExcluirTemasSRS() { document.getElementById("srs-excluir-temas-modal").classList.add("modal-oculto"); }
+
+function confirmarExclusaoTemasSelecionadosSRS() {
+    if (srsTemasParaExcluir.size === 0) { alert("Nenhum tema selecionado."); return; }
+    const temasSelecionados = new Set(srsTemasParaExcluir); // congela a seleção antes do modal fechar
+    const cardsAlvo = dados.srsItems.filter(i => temasSelecionados.has(i.tema));
+    if (cardsAlvo.length === 0) { alert("Nenhum card encontrado nos temas selecionados."); return; }
+
+    const qtdTemas = temasSelecionados.size;
+    fecharModalExcluirTemasSRS(); // evita sobrepor com o modal de confirmação abaixo
+    pedirConfirmacaoPerigosa(
+        `Excluir ${qtdTemas} tema(s) selecionado(s) e todos os ${cardsAlvo.length} card(s) deles? Essa ação não pode ser desfeita.`,
+        () => {
+            mostrarProgressoOperacao("Excluindo temas e cards...", "🗑️");
+            const total = cardsAlvo.length;
+            let excluidos = 0;
+            atualizarProgressoOperacao(0, total, "🗑️", "Excluindo cards...");
+            Promise.all(cardsAlvo.map(card =>
+                excluirMidiasDoCardSRS(card).finally(() => {
+                    excluidos++;
+                    atualizarProgressoOperacao(excluidos, total, "🗑️", "Excluindo cards...");
+                })
+            )).finally(() => {
+                const idsParaExcluir = new Set(cardsAlvo.map(c => c.id));
+                dados.srsItems = dados.srsItems.filter(i => !idsParaExcluir.has(i.id));
+                temasSelecionados.forEach(caminho => srsNosExpandidos.delete(caminho));
+                srsItemsAlterado = true;
+                srsTemasParaExcluir = new Set();
+                salvar();
+                esconderProgressoOperacao();
+                alert(`${qtdTemas} tema(s) excluído(s): ${cardsAlvo.length} card(s) removido(s).`);
+            });
+        }
+    );
+}
+
 let urlsImagemRevisaoAtual = [];
 function limparUrlsImagemRevisao() {
     urlsImagemRevisaoAtual.forEach(u => URL.revokeObjectURL(u));
@@ -2888,17 +2987,37 @@ function atualizarLimiteNovosSRS(valor) {
     salvar(); // salvar() já dispara atualizar() -> carregarRevisaoSRS()/atualizarEstatisticasSRS() com o novo limite
 }
 
+// NOVO: com decks grandes (milhares de cards importados do Anki), renderizar a lista "Deck Completo"
+// inteira de uma vez só cria tantos elementos DOM que só TROCAR de aba já travava a página por vários
+// segundos — a lista fica com display:none enquanto a aba não está ativa, e o navegador precisa
+// desenhar/posicionar tudo de uma vez assim que ela fica visível, mesmo sem nenhum JS rodando nesse
+// momento (chegava a ~2.3s só nisso com um deck de 4400+ cards). Pagina a exibição (um pedaço por
+// vez) pra manter o número de elementos no DOM sob controle, independente do tamanho do deck.
+let srsListaPaginaAtual = 1;
+const SRS_LISTA_TAMANHO_PAGINA = 100;
+function mudarPaginaListaSRS(delta) {
+    srsListaPaginaAtual += delta;
+    renderizarListaSRS();
+    document.getElementById("lista-srs-completa")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 function renderizarListaSRS() {
     const lista = document.getElementById("lista-srs-completa");
     if(!lista) return;
     if (elementoEmEdicaoDentroDe("lista-srs-completa")) return; // não reconstrói enquanto edita um card aqui
     dados.srsItems.sort((a,b) => a.tema.localeCompare(b.tema));
+
+    const totalPaginas = Math.max(1, Math.ceil(dados.srsItems.length / SRS_LISTA_TAMANHO_PAGINA));
+    if (srsListaPaginaAtual > totalPaginas) srsListaPaginaAtual = totalPaginas;
+    if (srsListaPaginaAtual < 1) srsListaPaginaAtual = 1;
+    const inicio = (srsListaPaginaAtual - 1) * SRS_LISTA_TAMANHO_PAGINA;
+    const itensDaPagina = dados.srsItems.slice(inicio, inicio + SRS_LISTA_TAMANHO_PAGINA);
+
     // NOVO: monta tudo num array e junta uma vez só no final, em vez de "lista.innerHTML += ..." a
     // cada card — esse padrão é O(n²) (o navegador reserializa/reparseia o HTML acumulado inteiro a
     // cada iteração), e ficava bem perceptível em decks grandes importados do Anki (centenas/milhares
     // de cards).
     const partesHtml = [];
-    dados.srsItems.forEach(item => {
+    itensDaPagina.forEach(item => {
         const partesData = item.data_proxima_revisao.split('-');
         const ehCloze = item.tipo === "cloze" && item.clozePartes;
         let corpoHtml;
@@ -2916,6 +3035,15 @@ function renderizarListaSRS() {
         }
         partesHtml.push(`<div class="srs-item-mini"><div style="flex:1;"><input class="srs-tag-input" list="lista-temas-srs" value="${escaparHtml(item.tema)}" onblur="editarCampoSRS(${item.id}, 'tema', this.value)"><br>${corpoHtml}</div><div style="text-align:right;"><div style="font-size:0.8em; color:var(--text-secondary); white-space:nowrap;">Rev: ${partesData[2]}/${partesData[1]}</div><button class="btn-preview-card-srs" onclick="visualizarCardSRS(${item.id})" title="Pré-visualizar como esse card é exibido (não conta para o histórico)">👁️</button><button onclick="removerCardSRS(${item.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.2em;">&times;</button></div></div>`);
     });
+
+    if (totalPaginas > 1) {
+        partesHtml.push(`<div class="srs-lista-paginacao">
+            <button onclick="mudarPaginaListaSRS(-1)" ${srsListaPaginaAtual === 1 ? "disabled" : ""}>◀ Anterior</button>
+            <span>Página ${srsListaPaginaAtual} de ${totalPaginas} (${dados.srsItems.length} cards no total)</span>
+            <button onclick="mudarPaginaListaSRS(1)" ${srsListaPaginaAtual === totalPaginas ? "disabled" : ""}>Próxima ▶</button>
+        </div>`);
+    }
+
     lista.innerHTML = partesHtml.join("");
 }
 

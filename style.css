@@ -410,6 +410,27 @@ button:hover { filter: brightness(0.9); }
     background: var(--table-row-hover);
 }
 
+/* NOVO: paginação da lista "Deck Completo" (ver renderizarListaSRS) — grid-column: 1/-1 faz esse
+   bloco ocupar a largura inteira do grid, em vez de virar só mais um "quadradinho" de card. */
+.srs-lista-paginacao {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 10px 0;
+    font-size: 0.85em;
+    color: var(--text-secondary);
+}
+.srs-lista-paginacao button {
+    padding: 6px 12px;
+    font-size: 0.95em;
+}
+.srs-lista-paginacao button:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
 .srs-tag {
     font-size: 0.75em;
     background: rgba(128, 128, 128, 0.2);
