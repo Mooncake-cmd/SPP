@@ -54,9 +54,10 @@ dados.chefoes.forEach(c => {
         delete c.xpRecompensa;
     }
 });
+// NOVO: dados.srsItems agora vive de verdade no IndexedDB (ver window.onload) — o valor aqui (vindo
+// do JSON do localStorage) pode não ser o definitivo ainda, então as passadas de compatibilidade de
+// cada card (resposta/tipo) rodam lá, sobre o valor final, não aqui. Só a rede de segurança mínima.
 if (!dados.srsItems) dados.srsItems = [];
-dados.srsItems.forEach(i => { if (i.resposta === undefined) i.resposta = ""; }); // compatibilidade com cards antigos
-dados.srsItems.forEach(i => { if (!i.tipo) i.tipo = "normal"; }); // compatibilidade com cards antigos (antes do modo Cloze)
 if (!dados.srsRevisoesLog) dados.srsRevisoesLog = []; // histórico de cada revisão (card, data, nota) — base pra otimizar um algoritmo mais sofisticado (ex: FSRS) no futuro
 if (dados.srsLimiteNovosPorDia === undefined) dados.srsLimiteNovosPorDia = 20; // limite de cards NUNCA revisados (intervalo_atual === 0) introduzidos por dia
 if (!dados.biblioteca) dados.biblioteca = [];
@@ -159,7 +160,20 @@ function hojeISO() {
 }
 
 /* === FUNÇÕES BÁSICAS E DE DANO === */
-function salvarDados() { localStorage.setItem("dados", JSON.stringify(dados)); }
+// NOVO: dados.srsItems fica de fora do JSON do localStorage (ver "CARDS DO SRS" mais abaixo, perto
+// de abrirDBImagensSRS) — ele é guardado à parte no IndexedDB, que tem cota muito maior. Só grava lá
+// quando algo de fato mudou (srsItemsAlterado), já que o array pode ser grande e salvar() roda a
+// cada ação do app inteiro (RPG, finanças etc.), não só quando o SRS muda. A gravação no IndexedDB é
+// "fire-and-forget": salvarDados() continua totalmente síncrono pra quem chama, igual antes.
+let srsItemsAlterado = false;
+function salvarDados() {
+    const { srsItems, ...dadosSemCards } = dados;
+    localStorage.setItem("dados", JSON.stringify(dadosSemCards));
+    if (srsItemsAlterado) {
+        srsItemsAlterado = false;
+        salvarSrsItemsIndexedDB(dados.srsItems).catch(err => console.error("Falha ao salvar os cards de SRS no IndexedDB:", err));
+    }
+}
 function salvar() { salvarDados(); atualizar(); }
 
 function isItemAtivoHoje(item) {
@@ -300,13 +314,20 @@ function confirmarGameOver() {
             ultimaData: "", pontosAcumulados: 0, hp: 300, maxHp: 300, maestriaAcumulada: {}
         };
         localStorage.setItem("dados", JSON.stringify(dadosNovos));
-        location.reload();
+        // NOVO: dados.srsItems agora vive à parte no IndexedDB (ver abrirDBSrsCards) — sem limpar ele
+        // aqui também, os cards "resetados" ressuscitariam sozinhos no próximo carregamento (a
+        // hidratação de window.onload traria de volta o array antigo do IndexedDB por cima do
+        // srsItems: [] escrito acima). Só recarrega depois da limpeza terminar, pra não arriscar a
+        // navegação cortar a transação do IndexedDB no meio.
+        limparSrsItemsIndexedDB().catch(err => console.error("Falha ao limpar os cards de SRS no reset:", err)).finally(() => location.reload());
     });
 }
 function confirmarResetTotal() {
     pedirConfirmacaoPerigosa("Isso vai apagar TODOS os seus dados (RPG, timer, objetivos, SRS, biblioteca). Essa ação não pode ser desfeita.", () => {
         localStorage.removeItem("dados");
-        location.reload();
+        // NOVO: mesmo motivo do confirmarGameOver acima — dados.srsItems vive à parte no IndexedDB
+        // agora, precisa ser limpo explicitamente aqui também.
+        limparSrsItemsIndexedDB().catch(err => console.error("Falha ao limpar os cards de SRS no reset:", err)).finally(() => location.reload());
     });
 }
 
@@ -1152,6 +1173,7 @@ function adicionarCardSRS() {
 
         aplicarImagensPendentesNoCard(item, "srs").then(() => {
             cancelarEdicaoCardSRS();
+            srsItemsAlterado = true;
             salvar();
             alert("Card atualizado! ✏️");
         });
@@ -1167,6 +1189,7 @@ function adicionarCardSRS() {
         document.getElementById("srs-subtema").value = ""; document.getElementById("srs-resposta").value = "";
         cancelarModoClozeSRS('srs');
         resetarImagensPendentes('srs');
+        srsItemsAlterado = true;
         salvar(); alert("Card adicionado ao Deck! 🧠");
     });
 }
@@ -1381,6 +1404,7 @@ function excluirTema(caminho) {
                 const idsParaExcluir = new Set(cardsAlvo.map(c => c.id));
                 dados.srsItems = dados.srsItems.filter(i => !idsParaExcluir.has(i.id));
                 srsNosExpandidos.delete(caminho);
+                srsItemsAlterado = true;
                 salvar();
                 esconderProgressoOperacao();
                 alert(`Tema excluído: ${cardsAlvo.length} card(s) removido(s).`);
@@ -1825,6 +1849,7 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
                 if (card._midiaNaoSuportada) resumo.midiaNaoSuportada++;
                 delete card._midiaNaoSuportada;
                 dados.srsItems.push(card);
+                srsItemsAlterado = true;
                 resumo.sucesso++;
             })
             .catch(err => { registrarFalha(resumo, `[${modelo.name || "modelo sem nome"}] ${err.message || err}`); })
@@ -2779,6 +2804,7 @@ function removerCardSRS(id) {
     const card = dados.srsItems.find(i => i.id === id);
     Promise.resolve(card ? excluirMidiasDoCardSRS(card) : null).finally(() => {
         dados.srsItems = dados.srsItems.filter(i => i.id !== id);
+        srsItemsAlterado = true;
         salvar();
     });
 }
@@ -2787,9 +2813,10 @@ function editarCampoSRS(id, campo, valor) {
     const item = dados.srsItems.find(i => i.id === id);
     if (!item) return;
     const valorLimpo = (valor || "").trim();
-    if (campo === 'resposta' && (valorLimpo === '' || valorLimpo === '(sem resposta — clique para adicionar)')) { item.resposta = ""; salvar(); return; }
+    if (campo === 'resposta' && (valorLimpo === '' || valorLimpo === '(sem resposta — clique para adicionar)')) { item.resposta = ""; srsItemsAlterado = true; salvar(); return; }
     if ((campo === 'tema' || campo === 'subtema') && valorLimpo === '') { salvar(); return; } // não permite ficar vazio
     item[campo] = valorLimpo;
+    srsItemsAlterado = true;
     salvar();
 }
 
@@ -2929,6 +2956,64 @@ function excluirImagemSRS(id) {
     return abrirDBImagensSRS().then(db => new Promise((resolve, reject) => {
         const tx = db.transaction(IMAGENS_SRS_STORE_NAME, "readwrite");
         tx.objectStore(IMAGENS_SRS_STORE_NAME).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = (e) => reject(e);
+    }));
+}
+
+// === CARDS DO SRS (dados.srsItems) — mesmo padrão de armazenamento acima, banco separado ===
+// NOVO: dados.srsItems ficava embutido no JSON gigante do localStorage (guardado inteiro em toda
+// salvar()) — um deck grande do Anki importado (milhares de cards com HTML rico por campo) já passa
+// dos ~5-10MB de cota do localStorage por si só, travando TODO salvar() do app inteiro (RPG,
+// finanças etc. também), não só o SRS. Move só esse array pro IndexedDB (cota muito maior), guardado
+// como um valor só (o array inteiro, sob uma chave fixa) — não precisa granularidade por card, é a
+// mesma forma como ele já vive hoje dentro do JSON grande. dados.srsItems continua sendo, em tempo de
+// execução, um array JS comum e totalmente síncrono (ver window.onload, que hidrata ele a partir
+// daqui ANTES da primeira atualizar()) — só a persistência em disco muda, nenhum dos vários lugares
+// que já leem/filtram/ordenam esse array precisa mudar.
+const SRS_CARDS_DB_NAME = "srsCardsDB";
+const SRS_CARDS_DB_VERSION = 1;
+const SRS_CARDS_STORE_NAME = "cards";
+const SRS_CARDS_CHAVE = "todos";
+let dbSrsCardsInstance = null;
+
+function abrirDBSrsCards() {
+    return new Promise((resolve, reject) => {
+        if (dbSrsCardsInstance) { resolve(dbSrsCardsInstance); return; }
+        const request = indexedDB.open(SRS_CARDS_DB_NAME, SRS_CARDS_DB_VERSION);
+        request.onupgradeneeded = function(e) {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(SRS_CARDS_STORE_NAME)) {
+                db.createObjectStore(SRS_CARDS_STORE_NAME);
+            }
+        };
+        request.onsuccess = function(e) { dbSrsCardsInstance = e.target.result; resolve(dbSrsCardsInstance); };
+        request.onerror = function(e) { reject(e); };
+    });
+}
+function salvarSrsItemsIndexedDB(itens) {
+    return abrirDBSrsCards().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(SRS_CARDS_STORE_NAME, "readwrite");
+        tx.objectStore(SRS_CARDS_STORE_NAME).put(itens, SRS_CARDS_CHAVE);
+        tx.oncomplete = () => resolve();
+        tx.onerror = (e) => reject(e);
+    }));
+}
+// Resolve undefined se dados.srsItems nunca foi salvo aqui ainda (instalação nova, ou usuário
+// migrando de uma versão anterior a essa mudança — nesse caso window.onload mantém o valor que já
+// veio populado do localStorage em vez de sobrescrever com vazio).
+function carregarSrsItemsIndexedDB() {
+    return abrirDBSrsCards().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(SRS_CARDS_STORE_NAME, "readonly");
+        const req = tx.objectStore(SRS_CARDS_STORE_NAME).get(SRS_CARDS_CHAVE);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = (e) => reject(e);
+    }));
+}
+function limparSrsItemsIndexedDB() {
+    return abrirDBSrsCards().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(SRS_CARDS_STORE_NAME, "readwrite");
+        tx.objectStore(SRS_CARDS_STORE_NAME).delete(SRS_CARDS_CHAVE);
         tx.oncomplete = () => resolve();
         tx.onerror = (e) => reject(e);
     }));
@@ -4281,6 +4366,7 @@ function confirmarSrsRapido() {
         dados.srsItems.push(novoCard);
         fecharModalSrsRapido();
         esconderBarraSelecao();
+        srsItemsAlterado = true;
         salvar();
         alert("Card adicionado ao Deck! 🧠");
     });
@@ -5477,7 +5563,14 @@ function fecharModalDiaCalendario() {
     document.getElementById("calendario-dia-modal").classList.add("modal-oculto");
 }
 
-window.onload = function() {
+// NOVO: hidrata dados.srsItems a partir do IndexedDB ANTES da primeira atualizar() — o resto do app
+// inicializa normalmente só depois disso resolver, pra nenhuma das várias funções que leem
+// dados.srsItems de forma síncrona (fluxo de revisão, "Deck Completo", estatísticas, calendário)
+// rodar em cima de um array ainda incompleto. Cobre a migração de quem já usava o app antes dessa
+// mudança: se o IndexedDB ainda não tem nada salvo (itensSalvos undefined), mantém o valor que já
+// veio populado do JSON do localStorage (jeito antigo) em vez de zerar, e marca como "alterado" pra a
+// 1ª salvar() da sessão migrar esse valor pro IndexedDB de vez.
+function inicializarAppComSrsItems() {
     resetDiario();
     verificarGameOver();
     carregarPreferenciasTimer();
@@ -5493,4 +5586,19 @@ window.onload = function() {
         if (verificarRespawnChefoes()) { renderizarChefoes(); salvarDados(); }
         else atualizarContadoresChefoesSelados();
     }, 1000);
+}
+
+window.onload = function() {
+    carregarSrsItemsIndexedDB().then(itensSalvos => {
+        if (itensSalvos !== undefined) dados.srsItems = itensSalvos; // IndexedDB já é a fonte da verdade
+        else if (!Array.isArray(dados.srsItems)) dados.srsItems = [];
+        dados.srsItems.forEach(i => { if (i.resposta === undefined) i.resposta = ""; }); // compatibilidade com cards antigos
+        dados.srsItems.forEach(i => { if (!i.tipo) i.tipo = "normal"; }); // compatibilidade com cards antigos (antes do modo Cloze)
+        srsItemsAlterado = true; // garante que a 1ª salvar() da sessão já persiste no IndexedDB
+        inicializarAppComSrsItems();
+    }).catch(err => {
+        console.error("Falha ao carregar os cards de SRS do IndexedDB:", err);
+        if (!Array.isArray(dados.srsItems)) dados.srsItems = [];
+        inicializarAppComSrsItems();
+    });
 };
