@@ -3,6 +3,8 @@
     --secondary-color: #2196F3;
     --danger-color: #e53935;
     --danger-bg: #ffebee;
+    --warning-color: #e65100;
+    --warning-bg: #fff3e0;
     --bg-color: #f4f7f6;
     --card-bg: #ffffff;
     --text-color: #333333;
@@ -22,6 +24,8 @@ body.dark-mode {
     --secondary-color: #64b5f6;
     --danger-color: #ef5350;
     --danger-bg: #2c1a1a;
+    --warning-color: #ffb74d;
+    --warning-bg: #2c2110;
     --bg-color: #121212;
     --card-bg: #1e1e1e;
     --text-color: #e0e0e0;
@@ -1028,4 +1032,44 @@ button:hover { filter: brightness(0.9); }
 .srs-campo-caixa td, .srs-campo-caixa th, .srs-hint-anki td, .srs-hint-anki th {
     border: 1px solid var(--border-color);
     padding: 4px 8px;
+}
+
+/* NOVO: pré-visualização de um card específico (furando a fila, a partir do "Deck Completo") — ver
+   visualizarCardSRS/sairDoPreviewSRS. O aviso deixa claro que essa exibição não tem validade nenhuma
+   pro histórico/agendamento (ver processarRevisaoSRS), pra não ser confundida com uma revisão real. */
+.srs-preview-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: var(--warning-bg);
+    color: var(--warning-color);
+    border: 1px solid var(--warning-color);
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin-bottom: 12px;
+    font-size: 0.85em;
+    font-weight: bold;
+}
+.srs-preview-banner button {
+    background: none;
+    border: 1px solid var(--warning-color);
+    color: var(--warning-color);
+    padding: 3px 10px;
+    font-size: 0.95em;
+    font-weight: bold;
+    border-radius: 6px;
+    white-space: nowrap;
+}
+.btn-preview-card-srs {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    padding: 0;
+    font-size: 1.1em;
+    margin-right: 8px;
+    opacity: 0.7;
+}
+.btn-preview-card-srs:hover {
+    opacity: 1;
 }

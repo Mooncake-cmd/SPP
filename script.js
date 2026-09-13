@@ -2485,12 +2485,81 @@ function converterAnotacoesPinyin(texto) {
     });
 }
 
+// NOVO: "pré-visualização" de um card específico a partir do "Deck Completo" — fura a fila de
+// revisão só pra mostrar como aquele card é exibido (pergunta e, ao clicar em "mostrar resposta", a
+// resposta), SEM nenhuma validade no histórico/agendamento: clicar em Difícil/Bom/Fácil durante a
+// pré-visualização não grava nada em dados.srsRevisoesLog nem altera intervalo/data do card (ver
+// processarRevisaoSRS) — só volta pra fila normal. Cards que já estavam na fila continuam sendo
+// logados normalmente; nada nesse mecanismo toca o caminho de log dos cards reais.
+let modoPreviewSRS = false;
+
+function visualizarCardSRS(id) {
+    const card = dados.srsItems.find(i => i.id === id);
+    if (!card) return;
+    limparUrlsImagemRevisao();
+    respostaRevelada = false;
+    modoPreviewSRS = true;
+    cardAtualRevisao = card;
+    renderizarCardNaAreaRevisao(card);
+    const areaDisplay = document.getElementById("srs-card-display");
+    if (areaDisplay) areaDisplay.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function sairDoPreviewSRS() {
+    modoPreviewSRS = false;
+    cardAtualRevisao = null;
+    carregarRevisaoSRS();
+    atualizarEstatisticasSRS();
+}
+
+// Monta o HTML de um card (pergunta + área de resposta) dentro de #srs-card-display — usado tanto
+// pela fila normal de revisão (carregarRevisaoSRS) quanto pela pré-visualização (visualizarCardSRS).
+function renderizarCardNaAreaRevisao(card) {
+    const areaDisplay = document.getElementById("srs-card-display");
+    const controls = document.getElementById("srs-controls");
+    const feedback = document.getElementById("srs-feedback");
+    const btnRevelar = document.getElementById("btn-revelar-resposta");
+    if (!areaDisplay) return;
+
+    const ehCloze = card.tipo === "cloze" && card.clozePartes;
+    // NOVO: quando o card tem HTML rico por campo (camposFrente/camposVerso — ver
+    // converterNotaComTemplateAnki/converterNotaClozeAnki), preferimos exibir ele: preserva
+    // formatação/posição de imagem/tabelas do Anki original, em vez do texto achatado de sempre
+    // (subtema/resposta), mantido só como fallback pra decks já importados antes dessa mudança.
+    const perguntaHtml = ehCloze ? renderizarPerguntaCloze(card, false) :
+        (card.camposFrente ? montarCaixasCamposAnki(card.camposFrente) : escaparComHtmlProtegido(card.subtema));
+    // Cloze só ganha área de resposta separada quando existem campos complementares de verdade
+    // (ex: Embasamento, ✚ Saiba mais) — a resposta da lacuna em si já aparece revelada dentro da
+    // própria pergunta (ver revelarRespostaSRS), então sem camposVerso o comportamento de sempre
+    // (nenhuma área de resposta pro cloze) é mantido.
+    const temAreaResposta = ehCloze ? !!(card.camposVerso && card.camposVerso.length > 0) : true;
+    const corpoResposta = card.camposVerso
+        ? montarCaixasCamposAnki(card.camposVerso)
+        : (card.resposta ? escaparComHtmlProtegido(card.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>');
+    const blocoResposta = temAreaResposta ? `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${corpoResposta}</div>` : "";
+    const avisoPreview = modoPreviewSRS ? `<div class="srs-preview-banner">🔍 Pré-visualização — não conta para o histórico de revisões <button onclick="sairDoPreviewSRS()">Voltar para a fila</button></div>` : "";
+    areaDisplay.innerHTML = `${avisoPreview}<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(card.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${card.intervalo_atual} dias</div>`;
+    controls.classList.add("oculto");
+    if (btnRevelar) btnRevelar.classList.remove("oculto");
+    feedback.innerText = "Pense na resposta e depois revele.";
+    exibirImagensRevisaoAtual(card);
+    // As imagens/mídias embutidas no HTML rico (camposFrente/camposVerso) só têm o id do IndexedDB
+    // salvo — a blob URL de exibição precisa ser recriada a cada renderização (ver
+    // resolverMidiaInlineNoContainer).
+    resolverMidiaInlineNoContainer(document.getElementById("srs-pergunta-atual")).then(urls => urlsImagemRevisaoAtual.push(...urls));
+    resolverMidiaInlineNoContainer(document.getElementById("srs-resposta-area")).then(urls => urlsImagemRevisaoAtual.push(...urls));
+}
+
 function carregarRevisaoSRS() {
     const areaDisplay = document.getElementById("srs-card-display");
     const controls = document.getElementById("srs-controls");
     const feedback = document.getElementById("srs-feedback");
     const btnRevelar = document.getElementById("btn-revelar-resposta");
     if(!areaDisplay) return;
+    // Uma pré-visualização em andamento nunca deve ser interrompida por um refresh vindo de OUTRA
+    // parte do app (ex: salvar() disparado por uma sessão de Pomodoro terminando em segundo plano) —
+    // ela só termina quando o usuário sai de propósito (ver sairDoPreviewSRS/processarRevisaoSRS).
+    if (modoPreviewSRS) return;
 
     const hojeData = hojeISO();
     const filtroParcial = srsTemasSelecionados.size < srsTemasConhecidos.size;
@@ -2530,32 +2599,7 @@ function carregarRevisaoSRS() {
         cardAtualRevisao = null;
     } else {
         cardAtualRevisao = paraRevisar[0];
-        const ehCloze = cardAtualRevisao.tipo === "cloze" && cardAtualRevisao.clozePartes;
-        // NOVO: quando o card tem HTML rico por campo (camposFrente/camposVerso — ver
-        // converterNotaComTemplateAnki/converterNotaClozeAnki), preferimos exibir ele: preserva
-        // formatação/posição de imagem/tabelas do Anki original, em vez do texto achatado de sempre
-        // (subtema/resposta), mantido só como fallback pra decks já importados antes dessa mudança.
-        const perguntaHtml = ehCloze ? renderizarPerguntaCloze(cardAtualRevisao, false) :
-            (cardAtualRevisao.camposFrente ? montarCaixasCamposAnki(cardAtualRevisao.camposFrente) : escaparComHtmlProtegido(cardAtualRevisao.subtema));
-        // Cloze só ganha área de resposta separada quando existem campos complementares de verdade
-        // (ex: Embasamento, ✚ Saiba mais) — a resposta da lacuna em si já aparece revelada dentro da
-        // própria pergunta (ver revelarRespostaSRS), então sem camposVerso o comportamento de sempre
-        // (nenhuma área de resposta pro cloze) é mantido.
-        const temAreaResposta = ehCloze ? !!(cardAtualRevisao.camposVerso && cardAtualRevisao.camposVerso.length > 0) : true;
-        const corpoResposta = cardAtualRevisao.camposVerso
-            ? montarCaixasCamposAnki(cardAtualRevisao.camposVerso)
-            : (cardAtualRevisao.resposta ? escaparComHtmlProtegido(cardAtualRevisao.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>');
-        const blocoResposta = temAreaResposta ? `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${corpoResposta}</div>` : "";
-        areaDisplay.innerHTML = `<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(cardAtualRevisao.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${cardAtualRevisao.intervalo_atual} dias</div>`;;
-        controls.classList.add("oculto");
-        if (btnRevelar) btnRevelar.classList.remove("oculto");
-        feedback.innerText = "Pense na resposta e depois revele.";
-        exibirImagensRevisaoAtual(cardAtualRevisao);
-        // As imagens/mídias embutidas no HTML rico (camposFrente/camposVerso) só têm o id do
-        // IndexedDB salvo — a blob URL de exibição precisa ser recriada a cada renderização (ver
-        // resolverMidiaInlineNoContainer).
-        resolverMidiaInlineNoContainer(document.getElementById("srs-pergunta-atual")).then(urls => urlsImagemRevisaoAtual.push(...urls));
-        resolverMidiaInlineNoContainer(document.getElementById("srs-resposta-area")).then(urls => urlsImagemRevisaoAtual.push(...urls));
+        renderizarCardNaAreaRevisao(cardAtualRevisao);
     }
 }
 
@@ -2584,6 +2628,10 @@ function revelarRespostaSRS() {
 
 function processarRevisaoSRS(qualidade) {
     if(!cardAtualRevisao) return;
+    // Card em pré-visualização (ver visualizarCardSRS): Difícil/Bom/Fácil aqui não tem NENHUMA
+    // validade — não grava em dados.srsRevisoesLog, não mexe no intervalo/data do card, não credita
+    // pontos. É só um jeito de sair da pré-visualização e voltar pra fila normal.
+    if (modoPreviewSRS) { sairDoPreviewSRS(); return; }
     const intervaloAnterior = cardAtualRevisao.intervalo_atual;
     const fatorAnterior = cardAtualRevisao.fator_facilidade;
 
@@ -2692,7 +2740,7 @@ function renderizarListaSRS() {
             const temImagem = item.imagemPerguntaId || item.imagemRespostaId;
             corpoHtml = `<strong contenteditable="true" onblur="editarCampoSRS(${item.id}, 'subtema', this.innerText)">${escaparComHtmlProtegido(item.subtema)}</strong>${temImagem ? ' <span title="Este card tem imagem">🖼️</span>' : ''}<div style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;" contenteditable="true" onblur="editarCampoSRS(${item.id}, 'resposta', this.innerText)">${respostaTxt}</div>`;
         }
-        partesHtml.push(`<div class="srs-item-mini"><div style="flex:1;"><input class="srs-tag-input" list="lista-temas-srs" value="${escaparHtml(item.tema)}" onblur="editarCampoSRS(${item.id}, 'tema', this.value)"><br>${corpoHtml}</div><div style="text-align:right;"><div style="font-size:0.8em; color:var(--text-secondary); white-space:nowrap;">Rev: ${partesData[2]}/${partesData[1]}</div><button onclick="removerCardSRS(${item.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.2em;">&times;</button></div></div>`);
+        partesHtml.push(`<div class="srs-item-mini"><div style="flex:1;"><input class="srs-tag-input" list="lista-temas-srs" value="${escaparHtml(item.tema)}" onblur="editarCampoSRS(${item.id}, 'tema', this.value)"><br>${corpoHtml}</div><div style="text-align:right;"><div style="font-size:0.8em; color:var(--text-secondary); white-space:nowrap;">Rev: ${partesData[2]}/${partesData[1]}</div><button class="btn-preview-card-srs" onclick="visualizarCardSRS(${item.id})" title="Pré-visualizar como esse card é exibido (não conta para o histórico)">👁️</button><button onclick="removerCardSRS(${item.id})" style="background:none; color:var(--danger-color); padding:0; font-size:1.2em;">&times;</button></div></div>`);
     });
     lista.innerHTML = partesHtml.join("");
 }
