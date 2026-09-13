@@ -1647,6 +1647,82 @@ function decodificarMediaEntriesProtobuf(bytes) {
     return mapaMedia;
 }
 
+// Decodificador genérico (reaproveita lerVarintProtobuf/pularCampoProtobuf) que só extrai os poucos
+// campos pedidos de uma mensagem protobuf, ignorando (pulando) todo o resto — usado pra ler
+// NotetypeConfig e CardTemplateConfig do schema novo do Anki (ver construirModelosSchemaNovo) sem
+// precisar escrever um decodificador dedicado pra cada mensagem.
+function decodificarCamposProtobuf(bytes, camposString, camposVarint) {
+    const resultado = {};
+    let pos = 0;
+    while (pos < bytes.length) {
+        const [tag, pos1] = lerVarintProtobuf(bytes, pos);
+        const numeroCampo = tag >>> 3, wireType = tag & 0x7;
+        pos = pos1;
+        if (wireType === 2 && camposString.includes(numeroCampo)) {
+            const [tamanho, pos2] = lerVarintProtobuf(bytes, pos);
+            resultado[numeroCampo] = new TextDecoder("utf-8").decode(bytes.subarray(pos2, pos2 + tamanho));
+            pos = pos2 + tamanho;
+        } else if (wireType === 0 && camposVarint.includes(numeroCampo)) {
+            const [valor, pos2] = lerVarintProtobuf(bytes, pos);
+            resultado[numeroCampo] = valor;
+            pos = pos2;
+        } else {
+            pos = pularCampoProtobuf(bytes, pos, wireType);
+        }
+    }
+    return resultado;
+}
+
+// NOVO: no schema 18 do Anki (2.1.50+, o mesmo do collection.anki21b), as colunas col.decks/col.models
+// ficam vazias — decks e tipos de nota passaram a viver em tabelas dedicadas, com parte do conteúdo em
+// protobuf. Reconstrói o mesmo formato JSON (deckId -> {name}) que o resto do importador já espera de
+// col.decks, a partir da tabela "decks" (onde o nome já é uma coluna de texto simples, sem protobuf).
+function construirDecksSchemaNovo(db) {
+    const decksJson = {};
+    const linhas = db.exec("SELECT id, name FROM decks");
+    if (linhas.length) linhas[0].values.forEach(([id, name]) => { decksJson[String(id)] = { name }; });
+    return decksJson;
+}
+
+// Mesma ideia de construirDecksSchemaNovo, mas pra tipos de nota (modelsJson: notetypeId -> {name,
+// type, flds, tmpls}) — reconstruída a partir de "notetypes" (nome já é coluna simples; só o "kind"
+// — 0=normal, 1=cloze — vem no protobuf de config, campo 1), "fields" (nome do campo também já é
+// coluna simples, só precisamos da ordem) e "templates" (qfmt/afmt vêm no protobuf de config, campos
+// 1 e 2 — ver CardTemplateConfig no código-fonte do Anki).
+function construirModelosSchemaNovo(db) {
+    const modelsJson = {};
+    const linhasNotetypes = db.exec("SELECT id, name, config FROM notetypes");
+    if (!linhasNotetypes.length) return modelsJson;
+    linhasNotetypes[0].values.forEach(([id, name, config]) => {
+        const cfg = decodificarCamposProtobuf(config, [], [1]);
+        modelsJson[String(id)] = { name, type: cfg[1] || 0, flds: [], tmpls: [] };
+    });
+
+    const linhasFields = db.exec("SELECT ntid, ord, name FROM fields");
+    if (linhasFields.length) linhasFields[0].values.forEach(([ntid, ord, name]) => {
+        const modelo = modelsJson[String(ntid)];
+        if (modelo) modelo.flds[ord] = { name };
+    });
+
+    const linhasTemplates = db.exec("SELECT ntid, ord, config FROM templates");
+    if (linhasTemplates.length) linhasTemplates[0].values.forEach(([ntid, ord, config]) => {
+        const modelo = modelsJson[String(ntid)];
+        if (!modelo) return;
+        const cfg = decodificarCamposProtobuf(config, [1, 2], []);
+        modelo.tmpls[ord] = { qfmt: cfg[1] || "", afmt: cfg[2] || "" };
+    });
+
+    // flds/tmpls são preenchidos por posição (ord) acima, então podem ficar com "buracos" (sparse)
+    // se algum ord vier fora de sequência — normaliza pra array denso, já que o resto do importador
+    // (camposReferenciadosAnki, prepararTemplateAnki etc.) espera um array comum.
+    Object.values(modelsJson).forEach(modelo => {
+        modelo.flds = modelo.flds.filter(Boolean);
+        modelo.tmpls = modelo.tmpls.filter(Boolean);
+    });
+
+    return modelsJson;
+}
+
 function processarImportacaoApkg(arquivo) {
     const resumo = { sucesso: 0, midiaNaoSuportada: 0, falhas: 0, exemplosFalha: [] };
 
@@ -1656,7 +1732,15 @@ function processarImportacaoApkg(arquivo) {
             try {
                 return JSON.parse(new TextDecoder("utf-8").decode(bytes));
             } catch (e) {
-                return decodificarMediaEntriesProtobuf(bytes); // formato novo do Anki (2.1.50+)
+                // NOVO: no formato novo do Anki (2.1.50+), o "media" não é só o protobuf MediaEntries
+                // cru — em exportações mais recentes ele também vem comprimido em zstd, igual ao
+                // collection.anki21b (ver mais abaixo). Detecta pelo "magic number" padrão de um frame
+                // zstd (os 4 bytes 28 B5 2F FD) antes de descomprimir — sem isso, tentávamos decodificar
+                // como protobuf os bytes ainda comprimidos, o que sempre falhava ("wire type não
+                // suportado") por não ser protobuf válido, só lixo binário comprimido.
+                const ehZstd = bytes.length >= 4 && bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd;
+                const bytesProtobuf = ehZstd ? fzstd.decompress(bytes) : bytes;
+                return decodificarMediaEntriesProtobuf(bytesProtobuf);
             }
         }) : Promise.resolve({});
 
@@ -1664,13 +1748,20 @@ function processarImportacaoApkg(arquivo) {
             const nomeParaIndice = {};
             Object.keys(mapaMedia).forEach(indice => { nomeParaIndice[mapaMedia[indice]] = indice; });
 
-            const arquivoDbPlano = zip.file("collection.anki21") || zip.file("collection.anki2");
+            // NOVO: exportações do Anki 2.1.50+ incluem um "collection.anki2" que NÃO é o banco de
+            // verdade — é só um arquivo de aviso (1 nota dizendo "atualize o Anki"), mantido por
+            // compatibilidade com versões antigas que não entendem o formato novo. O banco de verdade
+            // fica no collection.anki21b (comprimido em zstd) quando ele existe — por isso ele tem que
+            // ser preferido PRIMEIRO; os arquivos "planos" só servem de fallback pra exportações mais
+            // antigas que nem tem collection.anki21b. Preferir o plano (como fazíamos antes) importava
+            // só esse aviso genérico e descartava os cards de verdade.
             const arquivoDbZstd = zip.file("collection.anki21b");
+            const arquivoDbPlano = zip.file("collection.anki21") || zip.file("collection.anki2");
             if (!arquivoDbPlano && !arquivoDbZstd) throw new Error("collection.anki2/anki21/anki21b não encontrado no .apkg.");
 
-            const promessaBytesDb = arquivoDbPlano
-                ? arquivoDbPlano.async("uint8array")
-                : arquivoDbZstd.async("uint8array").then(bytesComprimidos => fzstd.decompress(bytesComprimidos));
+            const promessaBytesDb = arquivoDbZstd
+                ? arquivoDbZstd.async("uint8array").then(bytesComprimidos => fzstd.decompress(bytesComprimidos))
+                : arquivoDbPlano.async("uint8array");
 
             return promessaBytesDb.then(bytes => {
                 const db = new SQL.Database(bytes);
@@ -1693,8 +1784,14 @@ function registrarFalha(resumo, mensagem) {
 function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     const colRows = db.exec("SELECT decks, models FROM col LIMIT 1");
     if (!colRows.length) throw new Error("Banco do Anki sem a tabela 'col' esperada.");
-    const decksJson = JSON.parse(colRows[0].values[0][0]);
-    const modelsJson = JSON.parse(colRows[0].values[0][1]);
+    const decksBruto = colRows[0].values[0][0];
+    const modelsBruto = colRows[0].values[0][1];
+    // NOVO: no schema 18 do Anki (2.1.50+, o mesmo do collection.anki21b), col.decks/col.models vêm
+    // vazios — decks e tipos de nota passam a viver em tabelas dedicadas (ver construirDecksSchemaNovo/
+    // construirModelosSchemaNovo). Sem isso, JSON.parse("") derrubava a importação inteira com
+    // "Unexpected end of JSON input" mesmo já tendo lido os cards certos do banco.
+    const decksJson = decksBruto ? JSON.parse(decksBruto) : construirDecksSchemaNovo(db);
+    const modelsJson = modelsBruto ? JSON.parse(modelsBruto) : construirModelosSchemaNovo(db);
 
     const linhas = db.exec(`
         SELECT notes.id, notes.mid, notes.flds,
