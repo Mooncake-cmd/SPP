@@ -1632,8 +1632,20 @@ function carregarSqlJs() {
 // progresso no título da aba (mesma ideia do timer pomodoro, que já faz isso) pra dar pra acompanhar
 // mesmo com a aba em segundo plano.
 let tituloAbaAntesDoProgresso = null;
+// NOVO: recarregar/fechar a aba no meio de uma dessas 3 operações (principalmente a importação de
+// .apkg, a mais demorada) perde tudo o que já tinha sido processado — os cards convertidos até ali só
+// existem em memória, só são gravados de verdade no final (ver salvar() em importarApkg). Sem aviso
+// nenhum, era fácil fechar por engano achando que a barra travou (ver fix de lotes acima) e perder a
+// importação inteira sem saber. O aviso nativo do navegador não deixa a gente escolher o texto exato
+// (cada um mostra uma mensagem genérica própria), mas continua sendo o jeito certo de dar essa chance
+// de "tem certeza?" antes de sair.
+function avisarSairDuranteProgresso(e) {
+    e.preventDefault();
+    e.returnValue = "";
+}
 function mostrarProgressoOperacao(tituloModal, emoji) {
     if (tituloAbaAntesDoProgresso === null) tituloAbaAntesDoProgresso = document.title;
+    window.addEventListener("beforeunload", avisarSairDuranteProgresso);
     const modal = document.getElementById("progresso-operacao-modal");
     if (!modal) return;
     document.getElementById("progresso-operacao-emoji").innerText = emoji;
@@ -1651,6 +1663,7 @@ function atualizarProgressoOperacao(concluidos, total, emoji, tituloAba) {
     document.title = `(${pct}%) ${emoji} ${tituloAba}`;
 }
 function esconderProgressoOperacao() {
+    window.removeEventListener("beforeunload", avisarSairDuranteProgresso);
     const modal = document.getElementById("progresso-operacao-modal");
     if (modal) modal.classList.add("modal-oculto");
     if (tituloAbaAntesDoProgresso !== null) {
