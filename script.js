@@ -2244,6 +2244,13 @@ function sanitizarNoAnki(raiz) {
                 altura: parseInt(el.getAttribute("height"), 10)
             };
         }
+        // NOVO: o placeholder de áudio/vídeo (um <span data-srs-midia-src-original="arquivo.ogg">,
+        // criado ANTES de chamar sanitizarNoAnki — ver extrairCampoAnkiComoHtml) também precisa
+        // sobreviver a essa limpeza, senão o resolvedor de mídia que roda DEPOIS (mais abaixo, no
+        // mesmo extrairCampoAnkiComoHtml) nunca encontra o marcador pra substituir — o span sobra
+        // vazio, sem nenhum erro, e o áudio simplesmente some da tela (bug real encontrado num deck de
+        // japonês: nenhum "❌"/"⚠️" na importação, mas nenhum player de áudio aparecia na revisão).
+        const midiaSrcOriginal = el.getAttribute("data-srs-midia-src-original");
         Array.from(el.attributes).forEach(attr => el.removeAttribute(attr.name));
         const estilos = estiloSeguro ? [estiloSeguro] : [];
         if (imgInfo) {
@@ -2252,6 +2259,7 @@ function sanitizarNoAnki(raiz) {
             if (!isNaN(imgInfo.largura) && imgInfo.largura > 0) estilos.push(`max-width: ${imgInfo.largura}px`);
             if (!isNaN(imgInfo.altura) && imgInfo.altura > 0) estilos.push(`max-height: ${imgInfo.altura}px`);
         }
+        if (midiaSrcOriginal) el.setAttribute("data-srs-midia-src-original", midiaSrcOriginal);
         if (estilos.length) el.setAttribute("style", estilos.join("; "));
     });
 }
