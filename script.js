@@ -1976,11 +1976,12 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     const colunas = linhas[0].columns;
     const idxMid = colunas.indexOf("mid"), idxFlds = colunas.indexOf("flds"), idxDid = colunas.indexOf("did");
 
-    const totalNotas = linhas[0].values.length;
+    const notas = linhas[0].values;
+    const totalNotas = notas.length;
     let processadas = 0;
     atualizarProgressoOperacao(0, totalNotas, "📥", "Importando baralho...");
 
-    const tarefas = linhas[0].values.map(linha => {
+    function processarNota(linha) {
         const mid = String(linha[idxMid]);
         const did = String(linha[idxDid]);
         const flds = linha[idxFlds].split("\x1f");
@@ -2003,9 +2004,28 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
             })
             .catch(err => { registrarFalha(resumo, `[${modelo.name || "modelo sem nome"}] ${err.message || err}`); })
             .finally(marcarProcessada);
-    });
+    }
 
-    return Promise.all(tarefas);
+    // NOVO: processar TODAS as notas de uma vez (um Promise.all só, sobre milhares de tarefas) travava
+    // decks pesados em mídia — cada campo com imagem/áudio dispara uma descompressão do zip E uma
+    // gravação no IndexedDB (às vezes as duas coisas em dobro, ver extrairMidiaDoCampo/
+    // extrairCampoAnkiComoHtml), tudo isso sem limite nenhum de quantas rodam ao mesmo tempo. Num deck
+    // de ~190MB com muita mídia, isso enfileira dezenas de milhares de microtasks de uma vez: o
+    // navegador nunca sobra um instante pra repintar a tela (a barra de progresso parece "travada"
+    // mesmo com o JS de verdade avançando por baixo dos panos) e a memória usada pra segurar todos os
+    // blobs pendentes ao mesmo tempo pode esgotar. Processar em lotes pequenos, com uma pausa real
+    // (setTimeout) entre eles, limita quanto fica pendente ao mesmo tempo e devolve o controle pro
+    // navegador repintar a cada lote — a barra passa a avançar de verdade, em vez de só no final.
+    const TAMANHO_LOTE_IMPORTACAO = 25;
+    function processarLote(inicio) {
+        const lote = notas.slice(inicio, inicio + TAMANHO_LOTE_IMPORTACAO);
+        if (lote.length === 0) return Promise.resolve();
+        return Promise.all(lote.map(processarNota))
+            .then(() => new Promise(resolve => setTimeout(resolve, 0)))
+            .then(() => processarLote(inicio + TAMANHO_LOTE_IMPORTACAO));
+    }
+
+    return processarLote(0);
 }
 
 // Mesmo teste de "tem conteúdo de verdade" usado em vários pontos do importador (campo extra do
