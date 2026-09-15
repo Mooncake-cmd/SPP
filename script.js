@@ -152,11 +152,7 @@ function hoje() { return new Date().toLocaleDateString(); }
 // horas antes da meia-noite local em fusos atrás de UTC (ex: Brasília, UTC-3), fazendo o
 // reset diário achar que "hoje" já foi processado quando a meia-noite local ainda nem chegou.
 function hojeISO() {
-    const d = new Date();
-    const ano = d.getFullYear();
-    const mes = String(d.getMonth() + 1).padStart(2, "0");
-    const dia = String(d.getDate()).padStart(2, "0");
-    return `${ano}-${mes}-${dia}`;
+    return dataParaIsoLocal(new Date());
 }
 
 /* === FUNÇÕES BÁSICAS E DE DANO === */
@@ -3097,7 +3093,7 @@ function calcularNovoIntervaloSRS(item, qualidade) {
 function calcularDataProximaRevisaoSRS(intervaloDias) {
     const d = new Date();
     d.setDate(d.getDate() + intervaloDias);
-    return d.toISOString().split('T')[0];
+    return dataParaIsoLocal(d);
 }
 function formatarPreviaIntervaloSRS(dias) {
     const rotulo = dias <= 0 ? "hoje" : dias === 1 ? "amanhã" : `em ${dias}d`;
@@ -5336,7 +5332,7 @@ function atualizarBannerVencimentoContas() {
     if (!banner) return;
     const hojeIsoAtual = hojeISO();
     const amanha = new Date(); amanha.setDate(amanha.getDate() + 1);
-    const amanhaISO = amanha.toISOString().split('T')[0];
+    const amanhaISO = dataParaIsoLocal(amanha);
 
     const vencidas = dados.financas.contasFixas.filter(c => c.proximoVencimento < hojeIsoAtual);
     const venceHoje = dados.financas.contasFixas.filter(c => c.proximoVencimento === hojeIsoAtual);
