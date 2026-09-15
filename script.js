@@ -2984,6 +2984,7 @@ function renderizarCardNaAreaRevisao(card) {
     controls.classList.add("oculto");
     if (btnRevelar) btnRevelar.classList.remove("oculto");
     feedback.innerText = "Pense na resposta e depois revele.";
+    atualizarPreviasBotoesRevisaoSRS(card);
     exibirImagensRevisaoAtual(card);
     // As imagens/mídias embutidas no HTML rico (camposFrente/camposVerso) só têm o id do IndexedDB
     // salvo — a blob URL de exibição precisa ser recriada a cada renderização (ver
@@ -3010,12 +3011,26 @@ function carregarRevisaoSRS() {
     // NOVO: limite diário de cards NUNCA revisados (intervalo_atual === 0 — nenhuma revisão ainda passou
     // por eles) — sem isso, importar um deck grande (ex: 750 cards) jogava tudo de uma vez na fila do
     // mesmo dia. Cards que já tiveram pelo menos 1 revisão (intervalo_atual > 0) nunca são barrados por
-    // esse limite, só os novos.
-    let vagasNovosHoje = Math.max(0, (dados.srsLimiteNovosPorDia ?? 20) - contarNovosEstudadosHoje());
+    // esse limite, só os novos. A cota é POR TEMA-RAIZ (ver limiteNovosParaTemaRaiz/
+    // contarNovosEstudadosHojePorTemaRaiz) — cada deck importado (Fiscal, Inglês, JLPT...) tem sua
+    // própria cota independente, igual o Anki de verdade faz por deck, em vez de um limite único
+    // compartilhado entre todos os temas.
+    const vagasPorTemaRaiz = new Map();
+    const novosEstudadosPorTemaRaiz = contarNovosEstudadosHojePorTemaRaiz();
+    function vagasRestantesNoTemaRaiz(temaRaiz) {
+        if (!vagasPorTemaRaiz.has(temaRaiz)) {
+            const limite = limiteNovosParaTemaRaiz(temaRaiz);
+            const usados = novosEstudadosPorTemaRaiz.get(temaRaiz) || 0;
+            vagasPorTemaRaiz.set(temaRaiz, Math.max(0, limite - usados));
+        }
+        return vagasPorTemaRaiz.get(temaRaiz);
+    }
     let novosBarradosHoje = 0;
     let paraRevisar = elegiveis.filter(item => {
         if (item.intervalo_atual !== 0) return true;
-        if (vagasNovosHoje > 0) { vagasNovosHoje--; return true; }
+        const temaRaiz = temaRaizSRS(item.tema);
+        const vagas = vagasRestantesNoTemaRaiz(temaRaiz);
+        if (vagas > 0) { vagasPorTemaRaiz.set(temaRaiz, vagas - 1); return true; }
         novosBarradosHoje++;
         return false;
     });
@@ -3032,7 +3047,7 @@ function carregarRevisaoSRS() {
 
     if(paraRevisar.length === 0) {
         const avisoNovosBarrados = novosBarradosHoje > 0
-            ? `<p style="color: var(--text-secondary); font-size: 0.9em;">Mais ${novosBarradosHoje} card(s) novo(s) esperando — o limite de novos por hoje já foi atingido. Volte amanhã ou aumente o limite em "Novos/dia".</p>`
+            ? `<p style="color: var(--text-secondary); font-size: 0.9em;">Mais ${novosBarradosHoje} card(s) novo(s) esperando — o limite de novos por hoje já foi atingido nos temas correspondentes. Volte amanhã ou ajuste o limite em "⚙️ Limites por tema".</p>`
             : "";
         areaDisplay.innerHTML = `<h3>🎉 Tudo em dia!</h3><p>Você revisou todos os cards${filtroParcial ? " dos temas selecionados" : ""} por hoje.</p>${avisoNovosBarrados}`;
         controls.classList.add("oculto");
@@ -3068,6 +3083,36 @@ function revelarRespostaSRS() {
     document.getElementById("srs-feedback").innerText = "Como foi sua memória?";
 }
 
+// Calcula o intervalo (em dias) que o SM-2 simplificado daria pra um card se ele fosse respondido com
+// essa qualidade — extraído de processarRevisaoSRS pra ser usado TAMBÉM na prévia embaixo dos botões
+// (ver atualizarPreviasBotoesRevisaoSRS), sem duplicar a fórmula em dois lugares que podiam divergir.
+// Não muda nada no card (fator_facilidade de "fácil" só é incrementado de verdade em
+// processarRevisaoSRS, depois que o usuário realmente clica) — é só leitura.
+function calcularNovoIntervaloSRS(item, qualidade) {
+    if (qualidade === 'dificil') return 1;
+    if (qualidade === 'bom') return item.intervalo_atual === 0 ? 1 : Math.ceil(item.intervalo_atual * item.fator_facilidade);
+    if (qualidade === 'facil') return item.intervalo_atual === 0 ? 4 : Math.ceil(item.intervalo_atual * item.fator_facilidade * 1.3);
+    return 0;
+}
+function calcularDataProximaRevisaoSRS(intervaloDias) {
+    const d = new Date();
+    d.setDate(d.getDate() + intervaloDias);
+    return d.toISOString().split('T')[0];
+}
+function formatarPreviaIntervaloSRS(dias) {
+    const rotulo = dias <= 0 ? "hoje" : dias === 1 ? "amanhã" : `em ${dias}d`;
+    return `${rotulo} · ${formatarDataBR(calcularDataProximaRevisaoSRS(dias))}`;
+}
+// NOVO: mostra embaixo de cada botão (Difícil/Bom/Fácil) a data em que o card volta a ser revisado SE
+// aquele botão for clicado agora — mesma ideia do Anki, que já mostra o intervalo resultante em cada
+// botão antes da escolha, pra dar uma noção real do efeito de cada resposta.
+function atualizarPreviasBotoesRevisaoSRS(item) {
+    ["dificil", "bom", "facil"].forEach(qualidade => {
+        const el = document.getElementById(`srs-previa-${qualidade}`);
+        if (el) el.textContent = formatarPreviaIntervaloSRS(calcularNovoIntervaloSRS(item, qualidade));
+    });
+}
+
 function processarRevisaoSRS(qualidade) {
     if(!cardAtualRevisao) return;
     // Card em pré-visualização (ver visualizarCardSRS): Difícil/Bom/Fácil aqui não tem NENHUMA
@@ -3077,14 +3122,11 @@ function processarRevisaoSRS(qualidade) {
     const intervaloAnterior = cardAtualRevisao.intervalo_atual;
     const fatorAnterior = cardAtualRevisao.fator_facilidade;
 
-    let novoIntervalo = 0;
-    if (qualidade === 'dificil') novoIntervalo = 1;
-    else if (qualidade === 'bom') novoIntervalo = (cardAtualRevisao.intervalo_atual === 0) ? 1 : Math.ceil(cardAtualRevisao.intervalo_atual * cardAtualRevisao.fator_facilidade);
-    else if (qualidade === 'facil') { novoIntervalo = (cardAtualRevisao.intervalo_atual === 0) ? 4 : Math.ceil(cardAtualRevisao.intervalo_atual * cardAtualRevisao.fator_facilidade * 1.3); cardAtualRevisao.fator_facilidade += 0.15; }
+    const novoIntervalo = calcularNovoIntervaloSRS(cardAtualRevisao, qualidade);
+    if (qualidade === 'facil') cardAtualRevisao.fator_facilidade += 0.15;
 
     cardAtualRevisao.intervalo_atual = novoIntervalo;
-    const dataObj = new Date(); dataObj.setDate(dataObj.getDate() + novoIntervalo);
-    cardAtualRevisao.data_proxima_revisao = dataObj.toISOString().split('T')[0];
+    cardAtualRevisao.data_proxima_revisao = calcularDataProximaRevisaoSRS(novoIntervalo);
     dados.pontosAcumulados += 10;
 
     // NOVO: registra cada revisão (não só o estado atual do card, que a linha acima já sobrescreve) —
@@ -3113,11 +3155,88 @@ function processarRevisaoSRS(qualidade) {
     atualizarEstatisticasSRS();
 }
 
-// Quantos cards NUNCA revisados antes (intervalo_anterior === 0 no log) já foram estudados hoje —
-// usado pelo limite diário de cards novos (ver carregarRevisaoSRS).
+// Quantos cards NUNCA revisados antes (intervalo_anterior === 0 no log) já foram estudados hoje, no
+// total — só usado pra estatística geral (ver atualizarEstatisticasSRS); o limite em si (ver
+// carregarRevisaoSRS) é calculado POR TEMA-RAIZ, ver contarNovosEstudadosHojePorTemaRaiz logo abaixo.
 function contarNovosEstudadosHoje() {
     const hojeData = hojeISO();
     return dados.srsRevisoesLog.filter(r => r.data === hojeData && r.intervalo_anterior === 0).length;
+}
+
+// ============================================================
+// === LIMITE DE CARDS NOVOS POR DIA — POR TEMA-RAIZ (igual o Anki faz por deck) ===
+// ============================================================
+// O "tema-raiz" é o primeiro segmento antes do primeiro "::" (ex: "Fiscal::Tributário" -> "Fiscal")
+// — cada deck importado do Anki vira uma dessas raízes. dados.srsLimiteNovosPorDia continua existindo
+// como o valor PADRÃO usado por qualquer tema-raiz sem uma entrada própria em
+// dados.srsLimitesNovosPorTema (assim quem nunca mexeu nessa configuração nova não perde nada — todo
+// tema continua usando o mesmo número de sempre, só que agora cada um com sua PRÓPRIA cota, em vez de
+// todos dividirem uma cota só).
+function temaRaizSRS(tema) {
+    return (tema || "").split("::")[0];
+}
+function limiteNovosParaTemaRaiz(temaRaiz) {
+    const limites = dados.srsLimitesNovosPorTema || {};
+    const valor = limites[temaRaiz];
+    return (typeof valor === "number") ? valor : (dados.srsLimiteNovosPorDia ?? 20);
+}
+// Mesma ideia de contarNovosEstudadosHoje, mas agrupado por tema-raiz — usa o tema ATUAL do card (via
+// dados.srsItems) pra cada entrada do log, então cards já excluídos (cujo log também já foi removido,
+// ver removerEntradasLogSRS) simplesmente não aparecem em nenhum grupo.
+function contarNovosEstudadosHojePorTemaRaiz() {
+    const hojeData = hojeISO();
+    const temaRaizPorId = new Map(dados.srsItems.map(i => [i.id, temaRaizSRS(i.tema)]));
+    const contagem = new Map();
+    dados.srsRevisoesLog.forEach(r => {
+        if (r.data !== hojeData || r.intervalo_anterior !== 0) return;
+        const temaRaiz = temaRaizPorId.get(r.cardId);
+        if (temaRaiz === undefined) return;
+        contagem.set(temaRaiz, (contagem.get(temaRaiz) || 0) + 1);
+    });
+    return contagem;
+}
+function obterTemasRaizConhecidosSRS() {
+    return [...new Set([...srsTemasConhecidos].map(temaRaizSRS))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+}
+function abrirModalLimitesNovosSRS() {
+    if (!dados.srsLimitesNovosPorTema) dados.srsLimitesNovosPorTema = {};
+    renderizarModalLimitesNovosSRS();
+    document.getElementById("srs-limites-novos-modal").classList.remove("modal-oculto");
+}
+function fecharModalLimitesNovosSRS() {
+    document.getElementById("srs-limites-novos-modal").classList.add("modal-oculto");
+}
+function renderizarModalLimitesNovosSRS() {
+    const container = document.getElementById("srs-limites-novos-lista");
+    if (!container) return;
+    const temasRaiz = obterTemasRaizConhecidosSRS();
+    if (temasRaiz.length === 0) { container.innerHTML = "<p class='biblioteca-vazio'>Nenhum tema cadastrado ainda.</p>"; return; }
+    const contagemHoje = contarNovosEstudadosHojePorTemaRaiz();
+    const overrides = dados.srsLimitesNovosPorTema || {};
+    container.innerHTML = temasRaiz.map(temaRaiz => {
+        const temOverride = typeof overrides[temaRaiz] === "number";
+        const valor = limiteNovosParaTemaRaiz(temaRaiz);
+        const hoje = contagemHoje.get(temaRaiz) || 0;
+        const nomeAttr = escaparAtributoHtml(temaRaiz);
+        return `<div class="srs-limite-tema-linha">
+            <span class="srs-limite-tema-nome" title="${nomeAttr}">${escaparHtml(temaRaiz)}</span>
+            <span class="srs-limite-tema-contagem">${hoje}/${valor} hoje</span>
+            <input type="number" min="0" class="input-mini" value="${valor}" onchange="atualizarLimiteNovosTemaSRS('${nomeAttr}', this.value)">
+            ${temOverride ? `<button class="btn-link-pequeno" onclick="restaurarLimitePadraoTemaSRS('${nomeAttr}')">usar padrão</button>` : ""}
+        </div>`;
+    }).join("");
+}
+function atualizarLimiteNovosTemaSRS(temaRaiz, valor) {
+    const n = parseInt(valor, 10);
+    if (!dados.srsLimitesNovosPorTema) dados.srsLimitesNovosPorTema = {};
+    dados.srsLimitesNovosPorTema[temaRaiz] = (isNaN(n) || n < 0) ? 0 : n;
+    salvar();
+    renderizarModalLimitesNovosSRS();
+}
+function restaurarLimitePadraoTemaSRS(temaRaiz) {
+    if (dados.srsLimitesNovosPorTema) delete dados.srsLimitesNovosPorTema[temaRaiz];
+    salvar();
+    renderizarModalLimitesNovosSRS();
 }
 function removerCardSRS(id) {
     if (!confirm("Excluir este card do deck?")) return;
@@ -3148,15 +3267,17 @@ function atualizarEstatisticasSRS() {
     const hojeData = hojeISO();
     const paraHoje = dados.srsItems.filter(i => i.data_proxima_revisao <= hojeData).length;
     const dominados = dados.srsItems.filter(i => i.intervalo_atual > 30).length;
+    // NOVO: o limite de novos agora é por tema-raiz (ver limiteNovosParaTemaRaiz), então um "X/Y" único
+    // não faz mais sentido aqui — cada tema tem seu próprio Y. Essa linha só mostra o total de novos
+    // estudados hoje somando todos os temas; o detalhe por tema fica no modal "⚙️ Limites por tema".
     const novosHoje = contarNovosEstudadosHoje();
-    const limiteNovos = dados.srsLimiteNovosPorDia ?? 20;
-    el.innerText = `${total} card(s) no total · ${paraHoje} para revisar hoje · ${dominados} dominado(s) (intervalo > 30 dias) · ${novosHoje}/${limiteNovos} novo(s) hoje`;
+    el.innerText = `${total} card(s) no total · ${paraHoje} para revisar hoje · ${dominados} dominado(s) (intervalo > 30 dias) · ${novosHoje} novo(s) hoje`;
 }
 
 function atualizarLimiteNovosSRS(valor) {
     const n = parseInt(valor, 10);
     dados.srsLimiteNovosPorDia = (isNaN(n) || n < 0) ? 0 : n;
-    salvar(); // salvar() já dispara atualizar() -> carregarRevisaoSRS()/atualizarEstatisticasSRS() com o novo limite
+    salvar(); // salvar() já dispara atualizar() -> carregarRevisaoSRS()/atualizarEstatisticasSRS() com o novo limite padrão
 }
 
 // NOVO: com decks grandes (milhares de cards importados do Anki), renderizar a lista "Deck Completo"

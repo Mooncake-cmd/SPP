@@ -348,10 +348,11 @@
 
                 <div class="form-group" style="margin-bottom: 15px; align-items: center;">
                     <button id="btn-escolher-temas-srs" class="btn-escolher-temas" onclick="abrirModalTemasSRS()">🗂️ Todos os temas</button>
-                    <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: var(--text-secondary); flex: none;" title="Máximo de cards NUNCA revisados introduzidos por dia. Cards já em revisão não entram nesse limite.">
-                        🆕 Novos/dia
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: var(--text-secondary); flex: none;" title="Valor padrão de cards NUNCA revisados introduzidos por dia, usado por qualquer tema sem um limite próprio. Cards já em revisão não entram nesse limite.">
+                        🆕 Novos/dia (padrão)
                         <input type="number" id="srs-limite-novos" class="input-mini" min="0" value="20" onchange="atualizarLimiteNovosSRS(this.value)">
                     </label>
+                    <button class="btn-escolher-temas" onclick="abrirModalLimitesNovosSRS()" title="Define um limite de cards novos por dia independente pra cada tema/deck">⚙️ Limites por tema</button>
                 </div>
                 
                 <div id="srs-card-display" class="srs-card-container">
@@ -363,9 +364,9 @@
                 <button id="btn-revelar-resposta" class="btn-revelar-resposta oculto" onclick="revelarRespostaSRS()">👁️ Mostrar Resposta</button>
 
                 <div id="srs-controls" class="srs-controls oculto">
-                    <button onclick="processarRevisaoSRS('dificil')" class="btn-srs-dificil">Difícil (1d)</button>
-                    <button onclick="processarRevisaoSRS('bom')" class="btn-srs-bom">Bom (Manter)</button>
-                    <button onclick="processarRevisaoSRS('facil')" class="btn-srs-facil">Fácil (Bônus)</button>
+                    <button onclick="processarRevisaoSRS('dificil')" class="btn-srs-dificil">Difícil<br><span id="srs-previa-dificil" class="srs-previa-botao"></span></button>
+                    <button onclick="processarRevisaoSRS('bom')" class="btn-srs-bom">Bom<br><span id="srs-previa-bom" class="srs-previa-botao"></span></button>
+                    <button onclick="processarRevisaoSRS('facil')" class="btn-srs-facil">Fácil<br><span id="srs-previa-facil" class="srs-previa-botao"></span></button>
                 </div>
                 
                 <p id="srs-feedback" style="text-align: center; margin-top: 10px; color: var(--text-secondary); font-size: 0.9em;"></p>
@@ -805,6 +806,17 @@
             <div class="form-group">
                 <button onclick="fecharModalExcluirTemasSRS()" style="background: var(--text-secondary);">Cancelar</button>
                 <button onclick="confirmarExclusaoTemasSelecionadosSRS()" style="background: var(--danger-color);">🗑️ Excluir selecionados</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="srs-limites-novos-modal" class="modal-oculto">
+        <div class="modal-content" style="max-width: 480px; max-height: 90vh; overflow-y: auto;">
+            <h2>⚙️ Limites de Cards Novos por Tema</h2>
+            <p style="font-size: 0.85em; color: var(--text-secondary); margin-top: -8px;">Cada tema-raiz (o primeiro nível, ex: "Fiscal" em "Fiscal::Tributário") tem sua própria cota diária de cards novos, independente dos outros — igual o Anki faz por deck. Temas sem um valor próprio usam o padrão definido em "Novos/dia".</p>
+            <div id="srs-limites-novos-lista" class="srs-limites-novos-lista"></div>
+            <div class="form-group">
+                <button onclick="fecharModalLimitesNovosSRS()">Fechar</button>
             </div>
         </div>
     </div>
