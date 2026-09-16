@@ -1917,6 +1917,27 @@ function descomprimirBlobSeZstd(blob) {
     });
 }
 
+// NOVO: o JSZip não infere o Content-Type de um arquivo pelo nome/extensão — o blob que
+// zip.file(x).async("blob") devolve vem com "type" vazio sempre que o arquivo original não estava
+// comprimido em zstd (o único lugar que já setava um "type" era descomprimirBlobSeZstd, e só no
+// caminho comprimido). Pra formatos "sniffáveis" como JPG/PNG isso não dava problema — o navegador
+// consegue adivinhar o tipo pelos bytes mesmo sem Content-Type — mas SVG usado num <img> via blob URL
+// EXIGE o MIME certo por segurança (é tratado como possível conteúdo executável): sem isso, a imagem
+// aparece como ícone de "quebrada" (naturalWidth 0), sem erro nenhum no console avisando por quê.
+const TIPOS_MIME_POR_EXTENSAO_MIDIA = {
+    svg: "image/svg+xml", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+    webp: "image/webp", bmp: "image/bmp", avif: "image/avif", tif: "image/tiff", tiff: "image/tiff",
+    mp3: "audio/mpeg", ogg: "audio/ogg", oga: "audio/ogg", wav: "audio/wav", m4a: "audio/mp4",
+    flac: "audio/flac", aac: "audio/aac", opus: "audio/opus", weba: "audio/webm",
+    mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", ogv: "video/ogg", mkv: "video/x-matroska"
+};
+function corrigirTipoMimeBlob(blob, nomeArquivo) {
+    const extensao = ((nomeArquivo || "").split(".").pop() || "").toLowerCase();
+    const tipoCerto = TIPOS_MIME_POR_EXTENSAO_MIDIA[extensao];
+    if (!tipoCerto || blob.type === tipoCerto) return blob;
+    return new Blob([blob], { type: tipoCerto });
+}
+
 function processarImportacaoApkg(arquivo) {
     const resumo = { sucesso: 0, midiaNaoSuportada: 0, falhas: 0, exemplosFalha: [] };
 
@@ -2217,9 +2238,20 @@ function prepararTemplatesAnki(modelo) {
     if (modelo.__templatesAnkiPreparados !== undefined) return modelo.__templatesAnkiPreparados;
     const nomesCampos = (modelo.flds || []).map(f => f.name);
     const preparados = nomesCampos.length > 0
-        ? (modelo.tmpls || []).filter(t => t && t.qfmt).map(tmpl => ({
-            qfmt: limparTemplateAnki(tmpl.qfmt), afmt: limparTemplateAnki(tmpl.afmt || ""), nomeTemplate: tmpl.name
-        }))
+        ? (modelo.tmpls || []).filter(t => t && t.qfmt).map(tmpl => {
+            const afmt = limparTemplateAnki(tmpl.afmt || "");
+            // NOVO: no Anki de verdade, revelar a resposta SUBSTITUI a tela inteira pelo que o afmt
+            // renderiza — {{FrontSide}} é só uma forma de o próprio afmt "pedir" pra repetir a frente
+            // dentro dessa nova tela. Templates que NÃO usam {{FrontSide}} (ex: "Ultimate Geography",
+            // cujo afmt redeclara {{Country}} do zero) já são standalone — mostram tudo que precisam
+            // sozinhos. Nosso site sempre manteve a pergunta visível e só ACRESCENTAVA a resposta
+            // embaixo (ver revelarRespostaSRS) — assumindo que o afmt sempre segue o padrão
+            // "{{FrontSide}}<hr>resto". Pra um afmt standalone, isso duplicava o conteúdo da frente na
+            // tela (ex: "United Kingdom" aparecendo 2x). Guardamos aqui se o afmt usa {{FrontSide}} pra
+            // decidir, na hora de revelar, se a pergunta deve continuar visível ou ser escondida.
+            const usaFrontSide = /\{\{FrontSide\}\}/.test(afmt);
+            return { qfmt: limparTemplateAnki(tmpl.qfmt), afmt, usaFrontSide, nomeTemplate: tmpl.name };
+        })
         : [];
     modelo.__templatesAnkiPreparados = preparados;
     return preparados;
@@ -2457,7 +2489,7 @@ function extrairCampoAnkiComoHtml(campoHtmlBruto, zip, nomeParaIndice) {
         const indice = nomeParaIndice[src];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => corrigirTipoMimeBlob(blob, src)).then(blob => {
                     const novoId = `anki_img_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
                     return salvarImagemSRS(novoId, blob).then(() => { img.setAttribute("data-srs-img-id", novoId); });
                 }).catch(() => { midiaNaoSuportada = true; img.remove(); })
@@ -2484,7 +2516,7 @@ function extrairCampoAnkiComoHtml(campoHtmlBruto, zip, nomeParaIndice) {
         const indice = nomeParaIndice[nomeArquivo];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => corrigirTipoMimeBlob(blob, nomeArquivo)).then(blob => {
                     const novoId = `anki_midia_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
                     return salvarImagemSRS(novoId, blob).then(() => {
                         span.setAttribute("data-srs-midia-id", novoId);
@@ -2704,6 +2736,10 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
             tema: tema, subtema: frenteHtml, resposta: versoHtml, tipo: "normal",
             data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
         };
+        // Ver comentário em prepararTemplatesAnki — sem {{FrontSide}} no afmt, a resposta é uma tela
+        // standalone (não uma continuação da pergunta), então escondemos a pergunta ao revelar (ver
+        // revelarRespostaSRS) pra não duplicar conteúdo que o próprio afmt já redeclara.
+        if (!prep.usaFrontSide) card.respostaSubstituiPergunta = true;
         aplicarMidiasExtraidasNoCard(card, "Pergunta", { imagens: imagensFrente, midias: midiasFrente });
         aplicarMidiasExtraidasNoCard(card, "Resposta", { imagens: imagensVerso, midias: midiasVerso });
         card._midiaNaoSuportada = midiaNaoSuportada;
@@ -2896,7 +2932,7 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
         const indice = nomeParaIndice[src];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => corrigirTipoMimeBlob(blob, src)).then(blob => {
                     const novoId = `anki_img_${Date.now()}_${Math.floor(Math.random() * 1000000)}_${posicao}`;
                     return salvarImagemSRS(novoId, blob).then(() => { imagensPorPosicao[posicao] = novoId; });
                 }).catch(() => { midiaNaoSuportada = true; })
@@ -2915,7 +2951,7 @@ function extrairMidiaDoCampo(campoHtml, zip, nomeParaIndice) {
         const indice = nomeParaIndice[nomeArquivo];
         if (indice !== undefined && zip.file(indice)) {
             tarefas.push(
-                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => {
+                zip.file(indice).async("blob").then(descomprimirBlobSeZstd).then(blob => corrigirTipoMimeBlob(blob, nomeArquivo)).then(blob => {
                     const novoId = `anki_midia_${Date.now()}_${Math.floor(Math.random() * 1000000)}_${posicao}`;
                     return salvarImagemSRS(novoId, blob).then(() => { midiasPorPosicao[posicao] = { id: novoId, tipo: tipo }; });
                 }).catch(() => { midiaNaoSuportada = true; })
@@ -3186,6 +3222,13 @@ function revelarRespostaSRS() {
     // antes só o card não-cloze caía aqui (cloze nunca tinha essa área, `if`/`else` eram excludentes).
     const respostaArea = document.getElementById("srs-resposta-area");
     if (respostaArea) respostaArea.classList.remove("oculto");
+    // NOVO: ver comentário de prepararTemplatesAnki/respostaSubstituiPergunta — quando o afmt do card
+    // não usa {{FrontSide}}, ele já é uma tela de resposta completa e standalone (redeclara tudo que
+    // precisa); manter a pergunta visível junto duplicaria conteúdo (ex: nome do país 2x na tela).
+    if (cardAtualRevisao && cardAtualRevisao.respostaSubstituiPergunta) {
+        const perguntaEl = document.getElementById("srs-pergunta-atual");
+        if (perguntaEl) perguntaEl.classList.add("oculto");
+    }
     const btnRevelar = document.getElementById("btn-revelar-resposta");
     if (btnRevelar) btnRevelar.classList.add("oculto");
     document.getElementById("srs-controls").classList.remove("oculto");
