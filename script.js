@@ -2237,6 +2237,9 @@ function prepararTemplateAnki(modelo) {
 function prepararTemplatesAnki(modelo) {
     if (modelo.__templatesAnkiPreparados !== undefined) return modelo.__templatesAnkiPreparados;
     const nomesCampos = (modelo.flds || []).map(f => f.name);
+    // NOVO: fonte/tamanho/etc. do CSS compartilhado do modelo (ver extrairEstilosDeClassesAnki) —
+    // calculado 1x aqui (mesmo cache por modelo de sempre), aplicado nos dois esqueletos abaixo.
+    const mapaClassesEstilo = extrairEstilosDeClassesAnki(modelo.css);
     const preparados = nomesCampos.length > 0
         ? (modelo.tmpls || []).filter(t => t && t.qfmt).map(tmpl => {
             const afmt = limparTemplateAnki(tmpl.afmt || "");
@@ -2259,8 +2262,8 @@ function prepararTemplatesAnki(modelo) {
             // Os tokens {{...}} sobrevivem intactos: pro parser HTML eles são só texto dentro de um nó
             // de texto, nunca uma tag — sanitizar ELEMENTOS não os atinge (ver
             // renderizarTemplateAnkiComHtmlRico, que substitui esses tokens depois).
-            const qfmtEsqueleto = sanitizarEsqueletoTemplateAnki(qfmt.replace(/\{\{FrontSide\}\}/g, ""));
-            const afmtEsqueleto = sanitizarEsqueletoTemplateAnki(afmt.replace(/\{\{FrontSide\}\}/g, ""));
+            const qfmtEsqueleto = sanitizarEsqueletoTemplateAnki(qfmt.replace(/\{\{FrontSide\}\}/g, ""), mapaClassesEstilo);
+            const afmtEsqueleto = sanitizarEsqueletoTemplateAnki(afmt.replace(/\{\{FrontSide\}\}/g, ""), mapaClassesEstilo);
             return { qfmt, afmt, qfmtEsqueleto, afmtEsqueleto, usaFrontSide, nomeTemplate: tmpl.name };
         })
         : [];
@@ -2271,9 +2274,9 @@ function prepararTemplatesAnki(modelo) {
 // Ver comentário em prepararTemplatesAnki. Roda o texto (já limpo) do template através da mesma
 // sanitização usada pro HTML dos campos, pra remover atributos/tags perigosos da estrutura literal do
 // PRÓPRIO template (nunca confiamos 100% num .apkg, mesmo na parte que não é conteúdo de nota).
-function sanitizarEsqueletoTemplateAnki(templateLimpo) {
+function sanitizarEsqueletoTemplateAnki(templateLimpo, mapaClassesEstilo) {
     const doc = new DOMParser().parseFromString(templateLimpo, "text/html");
-    sanitizarNoAnki(doc.body);
+    sanitizarNoAnki(doc.body, mapaClassesEstilo);
     return doc.body.innerHTML;
 }
 
@@ -2407,11 +2410,20 @@ const PROPRIEDADES_CSS_ANKI_PERMITIDAS = new Set([
     "color", "background-color", "font-weight", "font-style", "text-decoration", "text-align",
     "border", "border-top", "border-bottom", "border-left", "border-right",
     "padding", "padding-top", "padding-bottom", "padding-left", "padding-right",
-    "margin-top", "margin-bottom", "width", "max-width", "height", "max-height", "vertical-align"
+    "margin-top", "margin-bottom", "width", "max-width", "height", "max-height", "vertical-align",
+    // NOVO: fonte/tamanho do CSS do MODELO Anki (ver extrairEstilosDeClassesAnki) — ex. o rótulo
+    // "CAPITAL" do deck Ultimate Geography é menor/cinza/maiúsculo só por causa de ".type{font-size:
+    // 70%; text-transform:uppercase}" no modelo.css, nunca por style inline num campo.
+    "font-size", "font-family", "text-transform", "letter-spacing", "line-height", "font-variant"
 ]);
 
-// Filtra um valor de atributo "style" pra só deixar passar propriedades inofensivas (a lista acima),
-// com valor curto e sem nada que possa carregar recurso externo ou executar código.
+// Faixas de sanidade pra font-size (evita que um .apkg hostil estoure o layout do card com um valor
+// absurdo, ex. "font-size: 9999px" — não é um risco de execução de código, é só robustez de layout).
+const LIMITES_FONT_SIZE_ANKI = { px: [8, 60], em: [0.4, 4], rem: [0.4, 4], "%": [40, 300] };
+
+// Filtra um valor de atributo "style" (ou corpo de uma regra CSS — mesma sintaxe "prop: valor;...",
+// ver extrairEstilosDeClassesAnki) pra só deixar passar propriedades inofensivas (a lista acima), com
+// valor curto e sem nada que possa carregar recurso externo ou executar código.
 function sanitizarEstiloInlineAnki(valorStyle) {
     if (!valorStyle) return "";
     const permitido = [];
@@ -2423,9 +2435,45 @@ function sanitizarEstiloInlineAnki(valorStyle) {
         if (!PROPRIEDADES_CSS_ANKI_PERMITIDAS.has(prop)) return;
         if (!valor || valor.length > 100) return;
         if (/url\(|expression\(|javascript:|@import|[<>]/i.test(valor)) return;
+        if (prop === "font-size") {
+            const m = valor.match(/^([\d.]+)(px|em|rem|%)$/);
+            if (!m) return;
+            const [min, max] = LIMITES_FONT_SIZE_ANKI[m[2]];
+            const num = parseFloat(m[1]);
+            if (isNaN(num) || num < min || num > max) return;
+        }
         permitido.push(`${prop}: ${valor}`);
     });
     return permitido.join("; ");
+}
+
+// NOVO: extrai do CSS COMPARTILHADO do modelo Anki (modelo.css — nunca lido até agora) as regras de
+// seletor de classe simples (".nome { ... }", sem combinador/pseudo-classe/seletor de atributo) pra
+// aplicar como estilo nos elementos do esqueleto do template que usam essa classe (ver sanitizarNoAnki)
+// — é isso que faz o rótulo "Capital" do Ultimate Geography sair pequeno/cinza/maiúsculo, igual no
+// Anki, em vez de com o mesmo tamanho/cor do resto do card. Escopo DELIBERADAMENTE restrito: qualquer
+// coisa mais complexa (combinadores como ".value > img", @media, @font-face, animações,
+// pseudo-classes) é ignorada silenciosamente — semisso quebrar nada, só sem aplicar aquele estilo
+// específico. Sem @import/url() nenhum risco de carregar recurso externo; sanitizarEstiloInlineAnki já
+// filtra o corpo de cada regra com a mesma allowlist usada pro style inline.
+function extrairEstilosDeClassesAnki(css) {
+    const mapa = new Map();
+    if (!css || css.length > 20000) return mapa;
+    const semComentarios = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    const regexBloco = /([^{}]+)\{([^{}]*)\}/g;
+    let m;
+    while ((m = regexBloco.exec(semComentarios)) !== null) {
+        const estiloSeguro = sanitizarEstiloInlineAnki(m[2]);
+        if (!estiloSeguro) continue;
+        m[1].split(",").forEach(seletor => {
+            const nome = seletor.trim();
+            if (!/^\.[a-zA-Z_][a-zA-Z0-9_-]*$/.test(nome)) return; // só classe única — ver comentário acima
+            const nomeClasse = nome.slice(1);
+            const existente = mapa.get(nomeClasse);
+            mapa.set(nomeClasse, existente ? `${existente}; ${estiloSeguro}` : estiloSeguro);
+        });
+    }
+    return mapa;
 }
 
 // Sanitiza (em memória, numa árvore DOM desconectada da página) o HTML de um campo do Anki: remove
@@ -2436,7 +2484,7 @@ function sanitizarEstiloInlineAnki(valorStyle) {
 // quanto os símbolos matemáticos pequenos (que agora ficam na posição de verdade dentro do texto, não
 // soltos numa lista à parte). O src original vira um atributo temporário em vez de ir pro <img> de
 // verdade — nunca confiamos numa URL vinda do deck; a extração de mídia (via zip) resolve isso depois.
-function sanitizarNoAnki(raiz) {
+function sanitizarNoAnki(raiz, mapaClassesEstilo) {
     const TAGS_REMOVER_INTEIRO = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "LINK", "META", "FORM", "NOSCRIPT", "TEMPLATE"]);
     let mudou = true;
     while (mudou) {
@@ -2453,6 +2501,17 @@ function sanitizarNoAnki(raiz) {
     }
     raiz.querySelectorAll("*").forEach(el => {
         const estiloSeguro = sanitizarEstiloInlineAnki(el.getAttribute("style"));
+        // NOVO: resolve as classes do elemento (ex. class="type") pro estilo vindo do CSS do MODELO
+        // (ver extrairEstilosDeClassesAnki), ANTES de apagar o atributo "class" — nenhuma classe
+        // sobrevive na árvore final (mantém o mesmo invariante de sempre: só "style" e alguns
+        // data-* sobrevivem), só o efeito visual dela.
+        const estilosDasClasses = [];
+        if (mapaClassesEstilo && mapaClassesEstilo.size > 0) {
+            (el.getAttribute("class") || "").trim().split(/\s+/).forEach(nomeClasse => {
+                const estiloClasse = nomeClasse && mapaClassesEstilo.get(nomeClasse);
+                if (estiloClasse) estilosDasClasses.push(estiloClasse);
+            });
+        }
         let imgInfo = null;
         if (el.tagName === "IMG") {
             imgInfo = {
@@ -2470,7 +2529,11 @@ function sanitizarNoAnki(raiz) {
         // japonês: nenhum "❌"/"⚠️" na importação, mas nenhum player de áudio aparecia na revisão).
         const midiaSrcOriginal = el.getAttribute("data-srs-midia-src-original");
         Array.from(el.attributes).forEach(attr => el.removeAttribute(attr.name));
-        const estilos = estiloSeguro ? [estiloSeguro] : [];
+        // Ordem importa (igual à cascata real do CSS): a classe do modelo tem a especificidade mais
+        // baixa, então entra primeiro; o style inline do próprio elemento (mais específico) vem depois
+        // e pode sobrescrever a mesma propriedade; max-width/max-height da imagem continuam por último.
+        const estilos = [...estilosDasClasses];
+        if (estiloSeguro) estilos.push(estiloSeguro);
         if (imgInfo) {
             if (imgInfo.src) el.setAttribute("data-srs-img-src-original", imgInfo.src);
             if (imgInfo.alt) el.setAttribute("alt", imgInfo.alt);
