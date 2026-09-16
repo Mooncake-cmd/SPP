@@ -2054,13 +2054,17 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
         if (regexLatex.test(linha[idxFlds])) resumo.notasComLatex = (resumo.notasComLatex || 0) + 1;
 
         return converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice)
-            .then(card => {
-                if (!card) { registrarFalha(resumo, "Conversão não gerou um card válido."); return; }
-                if (card._midiaNaoSuportada) resumo.midiaNaoSuportada++;
-                delete card._midiaNaoSuportada;
-                dados.srsItems.push(card);
+            .then(cards => {
+                if (!cards || cards.length === 0) { registrarFalha(resumo, "Conversão não gerou nenhum card válido."); return; }
+                // NOVO: uma nota com múltiplos templates (ver prepararTemplatesAnki) vira múltiplos
+                // cards aqui — cada um conta pro "sucesso" normalmente, como se fossem notas separadas.
+                cards.forEach(card => {
+                    if (card._midiaNaoSuportada) resumo.midiaNaoSuportada++;
+                    delete card._midiaNaoSuportada;
+                    dados.srsItems.push(card);
+                    resumo.sucesso++;
+                });
                 srsItemsAlterado = true;
-                resumo.sucesso++;
             })
             .catch(err => { registrarFalha(resumo, `[${modelo.name || "modelo sem nome"}] ${err.message || err}`); })
             .finally(marcarProcessada);
@@ -2096,6 +2100,8 @@ function campoAnkiTemConteudo(bruto) {
     return !!(bruto.replace(/<\/?[^>]+>/g, "").trim() || /<img[^>]+src=/i.test(bruto) || /\[sound:/i.test(bruto));
 }
 
+// Sempre resolve com um ARRAY de cards (1 ou mais) — nunca um card solto — porque um tipo de nota com
+// múltiplos templates gera múltiplos cards por nota (ver mais abaixo).
 function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
     const ehCloze = modelo.type === 1 || /cloze/i.test(modelo.name || "");
     if (ehCloze) {
@@ -2106,15 +2112,28 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
         const nomeCampoCloze = encontrarNomeCampoClozeAnki(modelo);
         const nomesCampos = (modelo.flds || []).map(f => f.name);
         const idx = nomeCampoCloze ? nomesCampos.indexOf(nomeCampoCloze) : -1;
-        return converterNotaClozeAnki(modelo, flds, idx !== -1 ? idx : 0, tema, zip, nomeParaIndice);
+        return converterNotaClozeAnki(modelo, flds, idx !== -1 ? idx : 0, tema, zip, nomeParaIndice).then(card => [card]);
     }
 
-    // NOVO: em vez de assumir por posição que o campo 0 é a frente e o campo 1+ vira a resposta
-    // (heurística que quebra em decks "profissionais" com campos de metadado — matéria, assunto —
-    // antes do conteúdo de verdade, ex: baralhos do Estratégia/Esquematiza AI), usamos o template real
-    // do Anki (qfmt/afmt, que já vem no .apkg) pra montar frente e verso exatamente como o Anki monta.
-    const prep = prepararTemplateAnki(modelo);
-    if (prep) return converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaIndice);
+    // NOVO: um tipo de nota pode ter MAIS DE UM TEMPLATE (ord 0, 1, 2...) — no Anki de verdade, cada
+    // nota gera 1 card POR TEMPLATE cujo campo obrigatório não estiver vazio (ex: o deck "Ultimate
+    // Geography" tem 4 templates — País↔Capital, Capital↔País, Bandeira↔País, Mapa↔País — uma nota só
+    // gera o card "Bandeira" se o campo Flag dela não estiver vazio). Usar só o 1º template (como
+    // fazíamos antes) descartava silenciosamente até 3 em cada 4 cards reais desse tipo de deck, sem
+    // erro nem aviso nenhum — a importação "dava certo" com uma fração do conteúdo de verdade.
+    const preps = prepararTemplatesAnki(modelo);
+    if (preps.length > 0) {
+        return Promise.all(preps.map(prep =>
+            converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaIndice)
+                .then(card => ({ ok: true, card }), err => ({ ok: false, err }))
+        )).then(resultados => {
+            const cards = resultados.filter(r => r.ok).map(r => r.card);
+            if (cards.length > 0) return cards;
+            // Nenhum template gerou card pra essa nota — sobra só a mensagem de erro do 1º template
+            // (mantém o comportamento de sempre pra modelos de 1 template só, a grande maioria dos decks).
+            throw resultados[0].err;
+        });
+    }
 
     // Fallback: só chega aqui se o deck não tiver um template legível (raro) — mantém a heurística
     // antiga por posição de campo, melhor do que simplesmente falhar a importação.
@@ -2131,7 +2150,7 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
             campoVerso = campoVerso.trim() ? [campoVerso, ...extras].join("<br>") : extras.join("<br>");
         }
     }
-    return converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaIndice);
+    return converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaIndice).then(card => [card]);
 }
 
 function encontrarNomeCampoClozeAnki(modelo) {
@@ -2175,20 +2194,35 @@ function camposReferenciadosAnki(templateLimpo, nomesCampos) {
 }
 
 // Prepara (e cacheia no próprio objeto do modelo, evitando reprocessar o mesmo template gigante a
-// cada nota) os dados fixos do template de um tipo de nota: qfmt/afmt já limpos e quais campos cada
-// lado referencia. Retorna null se o deck não tiver um template legível (cai no fallback por posição).
+// cada nota) os dados fixos do template de um tipo de nota: só qfmt/afmt já limpos — quais campos
+// cada lado referencia de VERDADE depende de quais seções condicionais estão ativas em CADA nota (ver
+// resolverSecoesCondicionaisAnki em converterNotaComTemplateAnki), então isso não pode ser cacheado
+// aqui por modelo. Retorna null se o deck não tiver um template legível (cai no fallback por posição).
 function prepararTemplateAnki(modelo) {
     if (modelo.__templateAnkiPreparado !== undefined) return modelo.__templateAnkiPreparado;
     const tmpl = modelo.tmpls && modelo.tmpls[0];
     const nomesCampos = (modelo.flds || []).map(f => f.name);
     let preparado = null;
     if (tmpl && tmpl.qfmt && nomesCampos.length > 0) {
-        const qfmt = limparTemplateAnki(tmpl.qfmt);
-        const afmt = limparTemplateAnki(tmpl.afmt || "");
-        preparado = { qfmt, afmt, camposFrente: camposReferenciadosAnki(qfmt, nomesCampos), camposVerso: camposReferenciadosAnki(afmt, nomesCampos) };
+        preparado = { qfmt: limparTemplateAnki(tmpl.qfmt), afmt: limparTemplateAnki(tmpl.afmt || "") };
     }
     modelo.__templateAnkiPreparado = preparado;
     return preparado;
+}
+
+// Mesma ideia de prepararTemplateAnki, mas pra TODOS os templates do modelo (modelo.tmpls[0], [1],
+// [2]...), não só o primeiro — usada por converterNotaAnki pra gerar 1 card por template válido.
+// Continua cacheada no próprio objeto do modelo, então só roda de verdade na 1ª nota daquele tipo.
+function prepararTemplatesAnki(modelo) {
+    if (modelo.__templatesAnkiPreparados !== undefined) return modelo.__templatesAnkiPreparados;
+    const nomesCampos = (modelo.flds || []).map(f => f.name);
+    const preparados = nomesCampos.length > 0
+        ? (modelo.tmpls || []).filter(t => t && t.qfmt).map(tmpl => ({
+            qfmt: limparTemplateAnki(tmpl.qfmt), afmt: limparTemplateAnki(tmpl.afmt || ""), nomeTemplate: tmpl.name
+        }))
+        : [];
+    modelo.__templatesAnkiPreparados = preparados;
+    return preparados;
 }
 
 // Interpreta o mini-formato de template do Anki (mustache-like): {{Campo}}/{{modificador:Campo}} viram
@@ -2196,9 +2230,16 @@ function prepararTemplateAnki(modelo) {
 // condicionais (mostra se o campo tem/não tem conteúdo); {{FrontSide}} vira vazio (a frente já é
 // exibida separada pelo app, repeti-la na resposta seria redundante); {{hint:Campo}} vira um
 // placeholder que vira uma caixa expansível de verdade depois (ver resolverHintsAnki).
-function renderizarTemplateAnki(templateLimpo, campos, hintsColetados) {
-    let resultado = templateLimpo.replace(/\{\{FrontSide\}\}/g, "");
-
+// Resolve só as seções condicionais {{#Campo}}...{{/Campo}} / {{^Campo}}...{{/Campo}} de um template
+// (já limpo), pros valores de campo de UMA nota específica — extraído de renderizarTemplateAnki pra
+// ser reaproveitado também ANTES de decidir quais campos "contam" pro lado frente/verso (ver
+// converterNotaComTemplateAnki). Sem isso, um campo mencionado dentro de uma seção escondida (ex:
+// {{Country}} usado só dentro de {{#Capital}}...{{/Capital}}, pra decidir SE existe o card de
+// Capital, não pra aparecer sozinho) era contado como "conteúdo de verdade" mesmo quando a seção
+// inteira estava oculta — gerando cards que o Anki de verdade não geraria pra aquela nota (decks com
+// múltiplos templates condicionais por campo, ex: "Ultimate Geography").
+function resolverSecoesCondicionaisAnki(templateLimpo, campos) {
+    let resultado = templateLimpo;
     // Repete a resolução de seções algumas vezes: templates mais elaborados (o do add-on Migaku, por
     // exemplo) aninham seção dentro de seção ("Is Audio Card" dentro de "Is Vocabulary Card") — uma
     // passada só não dá conta de resolver a de dentro.
@@ -2214,6 +2255,12 @@ function renderizarTemplateAnki(templateLimpo, campos, hintsColetados) {
         });
         if (resultado === antes) break;
     }
+    return resultado;
+}
+
+function renderizarTemplateAnki(templateLimpo, campos, hintsColetados) {
+    let resultado = templateLimpo.replace(/\{\{FrontSide\}\}/g, "");
+    resultado = resolverSecoesCondicionaisAnki(resultado, campos);
 
     resultado = resultado.replace(/\{\{hint:([^}]+)\}\}/g, (m, nomeCampo) => {
         const c = campos[nomeCampo.trim()];
@@ -2602,6 +2649,21 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         const campos = {};
         resultadosPorCampo.forEach(r => { campos[r.nome] = r; });
 
+        // NOVO: resolve as seções condicionais {{#Campo}}/{{^Campo}} PRA ESSA NOTA especificamente,
+        // antes de decidir quais campos "existem" nos lados frente/verso — prep.qfmt/prep.afmt são
+        // compartilhados entre TODAS as notas do modelo (cacheados 1x), então um campo só mencionado
+        // dentro de uma seção condicional (ex: {{Country}} usado só dentro de
+        // {{#Capital}}...{{/Capital}}, pra decidir SE o card de Capital existe) não pode ser tratado
+        // como "sempre presente" — cada nota tem seu próprio resultado, dependendo de quais campos
+        // dela estão vazios. Sem isso, {{Country}} (sempre preenchido) fazia a frente inteira parecer
+        // "com conteúdo" mesmo quando a seção que a envolve estava oculta pra essa nota — gerando
+        // cards que o Anki de verdade não geraria (ver detecção de múltiplos templates em
+        // converterNotaAnki).
+        const qfmtResolvido = resolverSecoesCondicionaisAnki(prep.qfmt, campos);
+        const afmtResolvido = resolverSecoesCondicionaisAnki(prep.afmt, campos);
+        const camposFrenteNota = camposReferenciadosAnki(qfmtResolvido, nomesCampos);
+        const camposVersoNota = camposReferenciadosAnki(afmtResolvido, nomesCampos);
+
         const hintsFrente = [], hintsVerso = [];
         let frenteHtml = renderizarTemplateAnki(prep.qfmt, campos, hintsFrente);
         let versoHtml = renderizarTemplateAnki(prep.afmt, campos, hintsVerso);
@@ -2614,8 +2676,8 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         let midiaNaoSuportada = false;
         let frenteTemConteudoRico = false, versoTemConteudoRico = false;
         resultadosPorCampo.forEach(r => {
-            if (prep.camposFrente.has(r.nome)) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); if (r.rico.temConteudo) frenteTemConteudoRico = true; }
-            if (prep.camposVerso.has(r.nome)) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); if (r.rico.temConteudo) versoTemConteudoRico = true; }
+            if (camposFrenteNota.has(r.nome)) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); if (r.rico.temConteudo) frenteTemConteudoRico = true; }
+            if (camposVersoNota.has(r.nome)) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); if (r.rico.temConteudo) versoTemConteudoRico = true; }
             // NOVO: só conta como "mídia não suportada" de verdade quando os DOIS pipelines falham em
             // resolver — o antigo (extrairMidiaDoCampo, ainda usado pro texto achatado/compatibilidade)
             // e o novo (extrairCampoAnkiComoHtml, o que realmente aparece na tela). Ex: imagem
@@ -2651,7 +2713,7 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         // campo (preserva formatação, imagem POSICIONADA no lugar certo, tabelas etc.), na mesma ordem
         // visual do template original — usado pela tela de revisão quando disponível (ver
         // carregarRevisaoSRS/montarCaixasCamposAnki).
-        const ordemAfmt = ordemDosCamposNoTemplate(prep.afmt, nomesCampos);
+        const ordemAfmt = ordemDosCamposNoTemplate(afmtResolvido, nomesCampos);
 
         // NOVO: se o modelo tem o padrão de múltipla escolha (ver detectarCamposOpcaoMultiplaEscolha),
         // esses campos ganham uma interface própria de seleção (ver renderizarOpcoesMultiplaEscolhaSRS)
@@ -2672,7 +2734,7 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         // duplicar (uma vez como opção clicável, outra vez como caixa solta).
         const camposParaExcluirDasCaixas = ehMultiplaEscolha ? new Set(camposOpcao) : new Set();
 
-        const camposFrenteRicos = ordemDosCamposNoTemplate(prep.qfmt, nomesCampos)
+        const camposFrenteRicos = ordemDosCamposNoTemplate(qfmtResolvido, nomesCampos)
             .filter(c => !camposParaExcluirDasCaixas.has(c.nome))
             .map(c => ({ ...c, campo: campos[c.nome] }))
             .filter(c => c.campo && c.campo.rico.temConteudo);
