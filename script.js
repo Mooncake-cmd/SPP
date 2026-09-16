@@ -2250,11 +2250,67 @@ function prepararTemplatesAnki(modelo) {
             // tela (ex: "United Kingdom" aparecendo 2x). Guardamos aqui se o afmt usa {{FrontSide}} pra
             // decidir, na hora de revelar, se a pergunta deve continuar visível ou ser escondida.
             const usaFrontSide = /\{\{FrontSide\}\}/.test(afmt);
-            return { qfmt: limparTemplateAnki(tmpl.qfmt), afmt, usaFrontSide, nomeTemplate: tmpl.name };
+            const qfmt = limparTemplateAnki(tmpl.qfmt);
+            // NOVO: sanitiza a "casca" do template (labels/divs/estrutura literal do próprio template
+            // — ex: os rótulos "CAPITAL"/"FLAG" do deck Ultimate Geography, perdidos até agora porque
+            // montarCaixasCamposAnki só extrai VALORES de campo, nunca o texto ao redor) com a MESMA
+            // allowlist usada pro conteúdo dos campos (ver sanitizarNoAnki) — feito 1x aqui, cacheado
+            // por template, porque só depende do texto do template em si, nunca dos valores das notas.
+            // Os tokens {{...}} sobrevivem intactos: pro parser HTML eles são só texto dentro de um nó
+            // de texto, nunca uma tag — sanitizar ELEMENTOS não os atinge (ver
+            // renderizarTemplateAnkiComHtmlRico, que substitui esses tokens depois).
+            const qfmtEsqueleto = sanitizarEsqueletoTemplateAnki(qfmt.replace(/\{\{FrontSide\}\}/g, ""));
+            const afmtEsqueleto = sanitizarEsqueletoTemplateAnki(afmt.replace(/\{\{FrontSide\}\}/g, ""));
+            return { qfmt, afmt, qfmtEsqueleto, afmtEsqueleto, usaFrontSide, nomeTemplate: tmpl.name };
         })
         : [];
     modelo.__templatesAnkiPreparados = preparados;
     return preparados;
+}
+
+// Ver comentário em prepararTemplatesAnki. Roda o texto (já limpo) do template através da mesma
+// sanitização usada pro HTML dos campos, pra remover atributos/tags perigosos da estrutura literal do
+// PRÓPRIO template (nunca confiamos 100% num .apkg, mesmo na parte que não é conteúdo de nota).
+function sanitizarEsqueletoTemplateAnki(templateLimpo) {
+    const doc = new DOMParser().parseFromString(templateLimpo, "text/html");
+    sanitizarNoAnki(doc.body);
+    return doc.body.innerHTML;
+}
+
+// Substitui {{Campo}}/{{modificador:Campo}} pelo HTML RICO já sanitizado de cada campo (ver
+// extrairCampoAnkiComoHtml) DENTRO do esqueleto do template — preserva rótulos/estrutura literal ao
+// redor (ex: "CAPITAL", <hr>, disposição), diferente de montarCaixasCamposAnki, que só joga os
+// VALORES em caixas soltas sem nada do texto original do template. O esqueleto já deve estar
+// sanitizado (ver sanitizarEsqueletoTemplateAnki) e com as seções condicionais já resolvidas (ver
+// resolverSecoesCondicionaisAnki) antes de chamar essa função. NUNCA sanitiza de novo aqui — o HTML de
+// cada campo já vem sanitizado; sanitizar de novo destruiria as referências de mídia já resolvidas
+// (data-srs-img-id/data-srs-midia-id).
+function renderizarTemplateAnkiComHtmlRico(esqueletoResolvido, campos, hintsColetados) {
+    let resultado = esqueletoResolvido;
+    resultado = resultado.replace(/\{\{hint:([^}]+)\}\}/g, (m, nomeCampo) => {
+        const nome = nomeCampo.trim();
+        const c = campos[nome];
+        if (!c || !c.rico.temConteudo) return "";
+        const idx = hintsColetados.length;
+        hintsColetados.push({ nome, html: c.rico.html });
+        return `${MARCA_INICIO_HINT_ANKI}HINT${idx}${MARCA_FIM_HINT_ANKI}`;
+    });
+    resultado = resultado.replace(/\{\{(?:[\w-]+:)?([^}]+)\}\}/g, (m, nomeCampo) => {
+        const nome = nomeCampo.trim();
+        if (nome === "Tags" || nome === "Type" || nome === "Deck" || nome === "Subdeck" || nome === "Card") return "";
+        const c = campos[nome];
+        return c ? c.rico.html : "";
+    });
+    return resultado;
+}
+
+// "Vazio" pra esse HTML já resolvido (com <img data-srs-img-id> ainda sem src de verdade, resolvido só
+// na hora de exibir — ver resolverMidiaInlineNoContainer): conta como conteúdo real ter texto sobrando
+// depois de tirar as tags, OU ter uma referência de mídia já resolvida.
+function htmlRicoTemConteudoReal(html) {
+    if (!html) return false;
+    if (/data-srs-img-id=|data-srs-midia-id=/.test(html)) return true;
+    return html.replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").trim().length > 0;
 }
 
 // Interpreta o mini-formato de template do Anki (mustache-like): {{Campo}}/{{modificador:Campo}} viram
@@ -2323,7 +2379,10 @@ function resolverHintsAnki(html, hints) {
         // Tira símbolo decorativo comum no início do nome do campo (ex: "✚ Saiba mais") — o ➕ do
         // resumo já indica visualmente que é expansível, não precisa repetir.
         const nomeLimpo = hint.nome.replace(/^[✚+*]\s*/, "");
-        const bloco = `${MARCA_INICIO_HINT_ANKI}<details class="srs-hint-anki"><summary>➕ ${escaparHtml(nomeLimpo)}</summary>${hint.texto}</details>${MARCA_FIM_HINT_ANKI}`;
+        // hint.html (pipeline novo, HTML rico) tem prioridade sobre hint.texto (pipeline antigo, texto
+        // achatado) — ver renderizarTemplateAnkiComHtmlRico.
+        const conteudoHint = hint.html !== undefined ? hint.html : hint.texto;
+        const bloco = `${MARCA_INICIO_HINT_ANKI}<details class="srs-hint-anki"><summary>➕ ${escaparHtml(nomeLimpo)}</summary>${conteudoHint}</details>${MARCA_FIM_HINT_ANKI}`;
         resultado = resultado.split(token).join(bloco);
     });
     return resultado;
@@ -2781,6 +2840,27 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         if (camposFrenteRicos.length > 0) card.camposFrente = camposFrenteRicos.map(c => ({ nome: c.nome, html: c.campo.rico.html, hint: c.hint }));
         if (camposVersoRicos.length > 0) card.camposVerso = camposVersoRicos.map(c => ({ nome: c.nome, html: c.campo.rico.html, hint: c.hint }));
 
+        // NOVO: além das caixas genéricas acima (mantidas como fallback — usadas por decks já
+        // importados antes dessa mudança, e por cards de múltipla escolha, cujos rótulos ["GABARITO:"
+        // etc.] a gente já sintetiza do próprio jeito, ver opcoesMultiplaEscolha acima), monta o HTML
+        // rico SUBSTITUINDO cada campo dentro do próprio esqueleto do template — preserva rótulos e
+        // estrutura literais que o template original tinha (ex: "CAPITAL"/"FLAG" no deck Ultimate
+        // Geography), que as caixas genéricas sempre descartaram por só extraírem o VALOR de cada
+        // campo. Pulamos isso pra múltipla escolha de propósito: substituir só o campo da opção (sem
+        // mexer no texto ao redor) deixaria um rótulo tipo "GABARITO: " sobrando sem valor nenhum
+        // depois, pior do que a caixa sintetizada que já temos.
+        if (!ehMultiplaEscolha) {
+            const hintsFrenteRico = [], hintsVersoRico = [];
+            const qfmtEsqueletoResolvido = resolverSecoesCondicionaisAnki(prep.qfmtEsqueleto, campos);
+            const afmtEsqueletoResolvido = resolverSecoesCondicionaisAnki(prep.afmtEsqueleto, campos);
+            let frenteRica = renderizarTemplateAnkiComHtmlRico(qfmtEsqueletoResolvido, campos, hintsFrenteRico);
+            let versoRica = renderizarTemplateAnkiComHtmlRico(afmtEsqueletoResolvido, campos, hintsVersoRico);
+            frenteRica = resolverHintsAnki(frenteRica, hintsFrenteRico);
+            versoRica = resolverHintsAnki(versoRica, hintsVersoRico);
+            if (htmlRicoTemConteudoReal(frenteRica)) card.frenteTemplateHtml = frenteRica;
+            if (htmlRicoTemConteudoReal(versoRica)) card.versoTemplateHtml = versoRica;
+        }
+
         return card;
     });
 }
@@ -3102,12 +3182,16 @@ function renderizarCardNaAreaRevisao(card) {
     // NOVO: cards de múltipla escolha auto-detectados (ver detectarCamposOpcaoMultiplaEscolha) ganham
     // a interface própria de seleção, junto com as outras caixas normais do lado da pergunta.
     const ehMultiplaEscolha = !!(card.opcoesMultiplaEscolha && card.opcoesMultiplaEscolha.length > 0);
-    // NOVO: quando o card tem HTML rico por campo (camposFrente/camposVerso — ver
-    // converterNotaComTemplateAnki/converterNotaClozeAnki), preferimos exibir ele: preserva
-    // formatação/posição de imagem/tabelas do Anki original, em vez do texto achatado de sempre
-    // (subtema/resposta), mantido só como fallback pra decks já importados antes dessa mudança.
+    // NOVO: card.frenteTemplateHtml/versoTemplateHtml (ver converterNotaComTemplateAnki) é a opção
+    // preferida quando existe — o campo substituído dentro do próprio esqueleto do template, mantendo
+    // rótulos/estrutura literais (ex: "CAPITAL" no deck Ultimate Geography) que camposFrente/
+    // camposVerso (caixa solta só com o VALOR de cada campo) sempre descartou. camposFrente/camposVerso
+    // continuam calculados e servem de fallback — decks já importados antes dessa mudança (sem o campo
+    // novo salvo) e cards de múltipla escolha (que pulam de propósito o HTML rico, ver
+    // converterNotaComTemplateAnki) continuam usando as caixas soltas de sempre.
     const perguntaHtml = ehCloze ? renderizarPerguntaCloze(card, false) :
-        (card.camposFrente ? montarCaixasCamposAnki(card.camposFrente) : escaparComHtmlProtegido(card.subtema)) +
+        (card.frenteTemplateHtml ? `<div class="srs-campo-caixa">${card.frenteTemplateHtml}</div>`
+            : (card.camposFrente ? montarCaixasCamposAnki(card.camposFrente) : escaparComHtmlProtegido(card.subtema))) +
         (ehMultiplaEscolha ? renderizarOpcoesMultiplaEscolhaSRS(card.opcoesMultiplaEscolha) : "");
     // Cloze só ganha área de resposta separada quando existem campos complementares de verdade
     // (ex: Embasamento, ✚ Saiba mais) — a resposta da lacuna em si já aparece revelada dentro da
@@ -3120,9 +3204,10 @@ function renderizarCardNaAreaRevisao(card) {
     // rótulo próprio ("Resposta correta:") em vez de deixar o valor solto sem contexto nenhum.
     const corpoResposta = ehMultiplaEscolha
         ? `<div class="srs-campo-caixa srs-mcq-gabarito">✅ Resposta correta: <b>${card.opcoesMultiplaEscolha.filter(o => o.correta).map(o => o.html).join(" / ")}</b></div>${card.camposVerso ? montarCaixasCamposAnki(card.camposVerso) : ""}`
-        : (card.camposVerso
-            ? montarCaixasCamposAnki(card.camposVerso)
-            : (card.resposta ? escaparComHtmlProtegido(card.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>'));
+        : (card.versoTemplateHtml ? `<div class="srs-campo-caixa">${card.versoTemplateHtml}</div>`
+            : (card.camposVerso
+                ? montarCaixasCamposAnki(card.camposVerso)
+                : (card.resposta ? escaparComHtmlProtegido(card.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>')));
     const blocoResposta = temAreaResposta ? `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${corpoResposta}</div>` : "";
     const avisoPreview = modoPreviewSRS ? `<div class="srs-preview-banner">🔍 Pré-visualização — não conta para o histórico de revisões <button onclick="sairDoPreviewSRS()">Voltar para a fila</button></div>` : "";
     areaDisplay.innerHTML = `${avisoPreview}<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(card.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${card.intervalo_atual} dias</div>`;
