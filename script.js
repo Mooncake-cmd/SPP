@@ -1716,9 +1716,19 @@ function importarApkg(event) {
             .then(resumo => {
                 esconderProgressoOperacao();
                 salvar();
+                if (resumo.deckVazio) {
+                    mostrarResultadoImportacao("Deck vazio", "⚠️", "Esse .apkg não tinha nenhuma nota — não havia nada pra importar. Confira se é o arquivo certo (ex: exportou um subdeck vazio por engano).");
+                    return;
+                }
                 let msg = `✅ ${resumo.sucesso} card(s) importado(s)\n⚠️ ${resumo.midiaNaoSuportada} card(s) com mídia não suportada (texto importado normalmente)\n❌ ${resumo.falhas} card(s) que falharam`;
+                if (resumo.notasComLatex) {
+                    msg += `\n🧮 ${resumo.notasComLatex} card(s) com fórmula LaTeX não renderizada (aparece como texto cru, ex: "[$]x^2[/$]")`;
+                }
                 if (resumo.exemplosFalha.length > 0) {
                     msg += `\n\nExemplos de erro (copie esse texto e cole na conversa se quiser que eu investigue):\n- ${resumo.exemplosFalha.join("\n- ")}`;
+                }
+                if (resumo.avisosFidelidade && resumo.avisosFidelidade.length > 0) {
+                    msg += `\n\n⚠️ Diferenças de fidelidade encontradas nesse deck (o card importa, mas fica diferente do Anki nesse ponto):\n- ${resumo.avisosFidelidade.join("\n- ")}`;
                 }
                 const houveFalha = resumo.falhas > 0;
                 mostrarResultadoImportacao(houveFalha ? "Importação concluída com falhas" : "Importação concluída", houveFalha ? "⚠️" : "✅", msg);
@@ -1962,6 +1972,13 @@ function registrarFalha(resumo, mensagem) {
     resumo.falhas++;
     if (resumo.exemplosFalha.length < 5) resumo.exemplosFalha.push(mensagem);
 }
+// Diferenças de fidelidade conhecidas (o card importa, mas fica diferente do Anki nesse ponto
+// específico — ver checarProblemasDeFidelidadeDoModelo) — deduplicado, porque a mesma mensagem se
+// repetiria pra cada nota do mesmo modelo num deck grande.
+function adicionarAvisoFidelidadeApkg(resumo, mensagem) {
+    if (!resumo.avisosFidelidade) resumo.avisosFidelidade = [];
+    if (!resumo.avisosFidelidade.includes(mensagem)) resumo.avisosFidelidade.push(mensagem);
+}
 
 function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     const colRows = db.exec("SELECT decks, models FROM col LIMIT 1");
@@ -1980,7 +1997,10 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
                (SELECT cards.did FROM cards WHERE cards.nid = notes.id LIMIT 1) as did
         FROM notes
     `);
-    if (!linhas.length) return Promise.resolve();
+    // NOVO: um deck sem NENHUMA nota (exportado vazio por engano, ou um subdeck vazio) antes "importava
+    // com sucesso" mostrando "0 card(s) importado(s)" sem explicar por quê — parecia um bug de
+    // importação em vez do que realmente é (o arquivo não tinha nada pra importar).
+    if (!linhas.length) { resumo.deckVazio = true; return Promise.resolve(); }
 
     const colunas = linhas[0].columns;
     const idxMid = colunas.indexOf("mid"), idxFlds = colunas.indexOf("flds"), idxDid = colunas.indexOf("did");
@@ -1989,6 +2009,35 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     const totalNotas = notas.length;
     let processadas = 0;
     atualizarProgressoOperacao(0, totalNotas, "📥", "Importando baralho...");
+
+    // NOVO: alguns recursos do Anki não têm suporte nenhum aqui — não quebram a importação (o card
+    // ainda entra, com o resto do conteúdo), mas o resultado final na tela pode ficar visivelmente
+    // diferente do que o Anki mostraria. Antes isso acontecia em silêncio, sem nenhum aviso; agora
+    // detectamos e avisamos, do mesmo jeito que já avisamos mídia não suportada. Cada checagem roda só
+    // 1x por MODELO (tipo de nota) — o problema é do template, então vale pra toda nota daquele tipo,
+    // sem repetir o mesmo aviso centenas de vezes num deck grande.
+    const modelosJaChecados = new Set();
+    function checarProblemasDeFidelidadeDoModelo(modelo) {
+        if (modelosJaChecados.has(modelo.id)) return;
+        modelosJaChecados.add(modelo.id);
+        const nomeModelo = modelo.name || "sem nome";
+        if (/image\s*occlusion/i.test(nomeModelo)) {
+            adicionarAvisoFidelidadeApkg(resumo, `Modelo "${nomeModelo}" é do tipo Image Occlusion (ocultar partes de uma imagem) — não tem suporte dedicado; o card pode não aparecer como no Anki.`);
+            return; // já é um caso especial conhecido, não precisa checar os filtros de template abaixo
+        }
+        const tmpl = modelo.tmpls && modelo.tmpls[0];
+        const textoTemplate = ((tmpl && tmpl.qfmt) || "") + " " + ((tmpl && tmpl.afmt) || "");
+        if (/\{\{type:/i.test(textoTemplate)) {
+            adicionarAvisoFidelidadeApkg(resumo, `Modelo "${nomeModelo}" usa {{type:Campo}} (resposta digitada com correção letra-a-letra) — importado como campo comum, sem essa interação.`);
+        }
+        if (/\{\{tts[\s:]/i.test(textoTemplate)) {
+            adicionarAvisoFidelidadeApkg(resumo, `Modelo "${nomeModelo}" usa {{tts:...}} (texto-pra-voz gerado pelo Anki) — não suportado; o texto aparece normal, mas sem esse áudio.`);
+        }
+    }
+    // Detecta LaTeX ([latex]...[/latex], [$]...[/$], [$$]...[/$$]) no conteúdo CRU da nota (é uma
+    // marcação dentro do campo, não do template — por isso checa por nota, não por modelo). Sem
+    // MathJax/similar pra renderizar, isso vira texto cru na tela em vez da fórmula matemática.
+    const regexLatex = /\[(latex|\$\$?)\]/i;
 
     function processarNota(linha) {
         const mid = String(linha[idxMid]);
@@ -2001,6 +2050,8 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
         const marcarProcessada = () => { processadas++; atualizarProgressoOperacao(processadas, totalNotas, "📥", "Importando baralho..."); };
 
         if (!modelo) { registrarFalha(resumo, `Tipo de nota (modelo) não encontrado no banco (mid ${mid}).`); marcarProcessada(); return Promise.resolve(); }
+        checarProblemasDeFidelidadeDoModelo(modelo);
+        if (regexLatex.test(linha[idxFlds])) resumo.notasComLatex = (resumo.notasComLatex || 0) + 1;
 
         return converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice)
             .then(card => {
