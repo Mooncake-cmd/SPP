@@ -163,12 +163,17 @@ function hojeISO() {
 // "fire-and-forget": salvarDados() continua totalmente síncrono pra quem chama, igual antes.
 let srsItemsAlterado = false;
 function salvarDados() {
+    // NOVO: timestamp de "última mudança local" (ver "SINCRONIZAÇÃO COM GOOGLE DRIVE" mais abaixo) —
+    // atualizado em TODA salvarDados() (ela só é chamada quando algo de fato mudou, é a convenção já
+    // usada em todo o resto do app), ANTES de destructurar "dados" pra já ir junto no JSON salvo.
+    dados._syncMeta = { ultimaModificacaoEm: Date.now(), dispositivoId: obterIdDispositivoSync() };
     const { srsItems, ...dadosSemCards } = dados;
     localStorage.setItem("dados", JSON.stringify(dadosSemCards));
     if (srsItemsAlterado) {
         srsItemsAlterado = false;
         salvarSrsItemsIndexedDB(dados.srsItems).catch(err => console.error("Falha ao salvar os cards de SRS no IndexedDB:", err));
     }
+    agendarSincronizacaoDrive();
 }
 function salvar() { salvarDados(); atualizar(); }
 
@@ -6204,6 +6209,233 @@ function importarBackupComLivros(arquivo) {
 }
 
 // ============================================================
+// === SINCRONIZAÇÃO COM GOOGLE DRIVE (opcional, por aparelho) ===
+// ============================================================
+// Sincroniza um único arquivo JSON no Drive do usuário (dados + srsItems, exatamente o que
+// exportarSoDados() já baixa hoje) entre os aparelhos onde ele conectar a MESMA conta Google.
+// Deliberadamente fora disso: PDFs da Biblioteca e imagens dos cards — nunca entram em "dados", não
+// tem por que entrar aqui; continuam só no Exportar/Importar Backup manual.
+//
+// Escopo mínimo (drive.file): o app só acessa o arquivo que ele mesmo cria, nunca o Drive inteiro do
+// usuário. O token de acesso fica só em memória (nunca em localStorage, que já guarda dado sensível
+// do app) — some ao recarregar a página; tentarReconectarDriveAoCarregar tenta renovar em silêncio
+// (sem popup) usando o consentimento já dado antes, e só volta a pedir clique se isso falhar.
+const GOOGLE_CLIENT_ID = "COLE_AQUI_O_CLIENT_ID.apps.googleusercontent.com"; // criado no Google Cloud Console
+const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const GOOGLE_DRIVE_ARQUIVO_NOME = "spp_sync.json";
+const SYNC_DRIVE_DEBOUNCE_MS = 20000; // espera 20s sem nenhuma mudança nova antes de subir pro Drive
+
+let googleTokenClient = null;
+let googleAccessToken = null;
+let driveConectado = false;
+let driveArquivoIdCache = null;
+let driveUltimaSincronizacaoEm = null;
+let driveSincronizando = false;
+let syncDrivePendente = null;
+let dadosRemotosPendentesConflito = null;
+
+// Identifica de qual aparelho veio a última mudança (só informativo por enquanto, guardado no próprio
+// payload sincronizado) — não é PII, é só um UUID aleatório sem ligação com o usuário.
+function obterIdDispositivoSync() {
+    let id = localStorage.getItem("spp_dispositivo_id");
+    if (!id) {
+        id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        localStorage.setItem("spp_dispositivo_id", id);
+    }
+    return id;
+}
+
+function inicializarGoogleTokenClient() {
+    if (googleTokenClient) return true;
+    if (typeof google === "undefined" || !google.accounts || !google.accounts.oauth2) return false;
+    googleTokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: GOOGLE_DRIVE_SCOPE,
+        callback: resposta => {
+            if (resposta.error) { onFalhaConexaoDrive(resposta); return; }
+            googleAccessToken = resposta.access_token;
+            driveConectado = true;
+            localStorage.setItem("spp_drive_auto_conectar", "1");
+            atualizarUiSincronizacaoDrive();
+            sincronizarComDrive();
+        }
+    });
+    return true;
+}
+
+function onFalhaConexaoDrive(resposta) {
+    driveConectado = false;
+    googleAccessToken = null;
+    // "interaction_required"/"immediate_failed" na tentativa SILENCIOSA são esperados (usuário nunca
+    // conectou antes, ou revogou o acesso) — não é erro de verdade, só não dá pra reconectar sem clique.
+    const esperadoNaTentativaSilenciosa = resposta && (resposta.error === "interaction_required" || resposta.error === "immediate_failed");
+    if (!esperadoNaTentativaSilenciosa) console.error("Falha ao conectar ao Google Drive:", resposta && resposta.error);
+    atualizarUiSincronizacaoDrive();
+}
+
+function conectarGoogleDrive(silencioso) {
+    if (!inicializarGoogleTokenClient()) {
+        if (!silencioso) alert("Não foi possível carregar o login do Google. Verifique sua conexão e tente de novo.");
+        return;
+    }
+    googleTokenClient.requestAccessToken({ prompt: silencioso ? "" : "consent" });
+}
+
+function desconectarGoogleDrive() {
+    if (googleAccessToken && typeof google !== "undefined" && google.accounts) {
+        google.accounts.oauth2.revoke(googleAccessToken, () => {});
+    }
+    googleAccessToken = null;
+    driveConectado = false;
+    driveArquivoIdCache = null;
+    localStorage.removeItem("spp_drive_auto_conectar");
+    atualizarUiSincronizacaoDrive();
+}
+
+// Roda 1x no carregamento da página (ver inicializarAppComSrsItems) — só tenta se o usuário já tinha
+// conectado antes nesse navegador; fica em silêncio (sem alert) se não conseguir reconectar sozinho.
+function tentarReconectarDriveAoCarregar() {
+    if (localStorage.getItem("spp_drive_auto_conectar") !== "1") return;
+    aguardarGoogleCarregado(() => conectarGoogleDrive(true));
+}
+
+function aguardarGoogleCarregado(callback, tentativas) {
+    tentativas = tentativas || 0;
+    if (typeof google !== "undefined" && google.accounts && google.accounts.oauth2) { callback(); return; }
+    if (tentativas > 20) return; // ~10s tentando (ex: sem internet ainda no primeiro instante) — desiste
+    setTimeout(() => aguardarGoogleCarregado(callback, tentativas + 1), 500);
+}
+
+function chamarApiDrive(url, opcoes) {
+    return fetch(url, Object.assign({}, opcoes, {
+        headers: Object.assign({ Authorization: `Bearer ${googleAccessToken}` }, (opcoes && opcoes.headers) || {})
+    })).then(r => {
+        if (!r.ok) throw new Error(`Drive API respondeu ${r.status}`);
+        return r.status === 204 ? null : r.json();
+    });
+}
+
+function buscarArquivoSyncDrive() {
+    if (driveArquivoIdCache) return Promise.resolve(driveArquivoIdCache);
+    const query = encodeURIComponent(`name='${GOOGLE_DRIVE_ARQUIVO_NOME}' and trashed=false`);
+    return chamarApiDrive(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id)`).then(j => {
+        driveArquivoIdCache = (j.files && j.files[0] && j.files[0].id) || null;
+        return driveArquivoIdCache;
+    });
+}
+
+function baixarConteudoDrive(fileId) {
+    return chamarApiDrive(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+}
+
+function enviarParaDrive(fileIdExistente, payload) {
+    if (fileIdExistente) {
+        return chamarApiDrive(`https://www.googleapis.com/upload/drive/v3/files/${fileIdExistente}?uploadType=media`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).then(() => fileIdExistente);
+    }
+    const boundary = `sppsync${Date.now()}`;
+    const metadata = { name: GOOGLE_DRIVE_ARQUIVO_NOME, mimeType: "application/json" };
+    const corpo =
+        `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+        `--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(payload)}\r\n--${boundary}--`;
+    return chamarApiDrive("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {
+        method: "POST",
+        headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+        body: corpo
+    }).then(j => { driveArquivoIdCache = j.id; return j.id; });
+}
+
+// Aplica um payload baixado do Drive (mais novo que o local) — mesmo padrão de importarDados():
+// substitui "dados" inteiro (já vem com srsItems dentro, igual o backup manual) e recarrega a página
+// em vez de tentar remendar variáveis já cacheadas em memória com o valor novo.
+function aplicarDadosRemotosDrive(remoto) {
+    dados = remoto;
+    srsItemsAlterado = true;
+    salvar();
+    location.reload();
+}
+
+// Ponto central: decide se sobe (local mais novo) ou baixa (remoto mais novo), nunca as duas coisas na
+// mesma chamada. Compara pelo timestamp gravado DENTRO do próprio payload (_syncMeta.ultimaModificacaoEm,
+// atualizado em TODA salvarDados() — ver lá), não pela data de modificação do arquivo no Drive, pra não
+// depender do relógio/latência da API.
+function sincronizarComDrive() {
+    if (!driveConectado || !googleAccessToken || driveSincronizando) return Promise.resolve();
+    driveSincronizando = true;
+    return buscarArquivoSyncDrive().then(fileId => {
+        if (!fileId) return enviarParaDrive(null, dados);
+        return baixarConteudoDrive(fileId).then(remoto => {
+            const timestampRemoto = (remoto && remoto._syncMeta && remoto._syncMeta.ultimaModificacaoEm) || 0;
+            const timestampLocal = (dados._syncMeta && dados._syncMeta.ultimaModificacaoEm) || 0;
+            if (timestampRemoto > timestampLocal) { avisarConflitoSincronizacaoDrive(remoto); return; }
+            return enviarParaDrive(fileId, dados);
+        });
+    }).then(() => {
+        driveUltimaSincronizacaoEm = Date.now();
+        atualizarUiSincronizacaoDrive();
+    }).catch(err => {
+        console.error("Sincronização com o Drive falhou:", err);
+    }).finally(() => { driveSincronizando = false; });
+}
+
+// Chamado em TODA salvarDados() (ver lá) — cancela o agendamento anterior e só sincroniza de verdade
+// depois de um período sem nenhuma mudança nova, pra não subir pro Drive a cada tecla/clique.
+function agendarSincronizacaoDrive() {
+    if (!driveConectado) return;
+    clearTimeout(syncDrivePendente);
+    syncDrivePendente = setTimeout(sincronizarComDrive, SYNC_DRIVE_DEBOUNCE_MS);
+}
+
+function sincronizarComDriveAgora() {
+    if (!driveConectado) { alert("Conecte o Google Drive primeiro."); return; }
+    clearTimeout(syncDrivePendente);
+    sincronizarComDrive();
+}
+
+// Nunca aplica/recarrega sozinho quando detecta uma versão remota mais nova — só mostra um aviso e
+// deixa o usuário decidir (usarVersaoRemotaDrive/manterVersaoLocalDrive), pra não descartar em silêncio
+// algo que ele esteja fazendo nessa aba agora.
+function avisarConflitoSincronizacaoDrive(remoto) {
+    dadosRemotosPendentesConflito = remoto;
+    const banner = document.getElementById("drive-conflito-banner");
+    if (banner) banner.classList.remove("oculto");
+}
+function usarVersaoRemotaDrive() {
+    if (!dadosRemotosPendentesConflito) return;
+    aplicarDadosRemotosDrive(dadosRemotosPendentesConflito);
+}
+function manterVersaoLocalDrive() {
+    dadosRemotosPendentesConflito = null;
+    const banner = document.getElementById("drive-conflito-banner");
+    if (banner) banner.classList.add("oculto");
+    // a versão local "ganha" a partir de agora -- sobrescreve a que estava no Drive com a de cá
+    enviarParaDrive(driveArquivoIdCache, dados).catch(err => console.error("Falha ao subir a versão local pro Drive:", err));
+}
+
+function atualizarUiSincronizacaoDrive() {
+    const status = document.getElementById("drive-sync-status");
+    if (!status) return; // UI ainda não existe nessa página/versão
+    const btnConectar = document.getElementById("btn-conectar-drive");
+    const btnDesconectar = document.getElementById("btn-desconectar-drive");
+    const btnSyncAgora = document.getElementById("btn-sincronizar-drive-agora");
+    if (driveConectado) {
+        const ultima = driveUltimaSincronizacaoEm ? new Date(driveUltimaSincronizacaoEm).toLocaleTimeString("pt-BR") : "ainda não sincronizou";
+        status.textContent = `✅ Conectado — última sincronização: ${ultima}`;
+        btnConectar.classList.add("oculto");
+        btnDesconectar.classList.remove("oculto");
+        btnSyncAgora.classList.remove("oculto");
+    } else {
+        status.textContent = "🔌 Desconectado";
+        btnConectar.classList.remove("oculto");
+        btnDesconectar.classList.add("oculto");
+        btnSyncAgora.classList.add("oculto");
+    }
+}
+
+// ============================================================
 // === CALENDÁRIO MINI (sidebar) — lembretes + eventos automáticos por dia ===
 // ============================================================
 const NOMES_MESES_CALENDARIO = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
@@ -6360,6 +6592,7 @@ function inicializarAppComSrsItems() {
     verificarContasAVencer();
     atualizar();
     inicializarCalendario();
+    tentarReconectarDriveAoCarregar(); // fire-and-forget: nunca atrasa o 1º render do app
 
     // NOVO: mantém o contador do Pacto do Tártaro correndo em tempo real enquanto a aba fica aberta —
     // a cada segundo, ou só atualiza o texto dos contadores já na tela, ou (se algum chefão completou

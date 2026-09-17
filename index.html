@@ -16,6 +16,9 @@
     <script src="https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+    <!-- login OAuth do Google (ver "SINCRONIZAÇÃO COM GOOGLE DRIVE" em script.js) — só é usado se o
+         usuário clicar em "Conectar Google Drive"; sem isso carregado, os botões de sync mostram um aviso. -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -592,9 +595,32 @@
                 <button onclick="document.getElementById('importarArquivo').click()" class="btn-importar">Importar Backup</button>
                 <button onclick="confirmarResetTotal()" class="btn-resetar">Resetar Tudo</button>
             </div>
+            <hr style="margin: 16px 0; border-color: var(--border-color);">
+            <h3 style="margin-bottom: 8px;">Sincronização automática (Google Drive)</h3>
+            <p style="color: var(--text-secondary); font-size: 0.85em; margin-top: 0;">
+                Sincroniza RPG, finanças e os cards de revisão entre os aparelhos onde você conectar a mesma
+                conta Google. Os PDFs da Biblioteca e as imagens dos cards NÃO entram aqui — continue usando
+                o Exportar/Importar Backup pra esses arquivos.
+            </p>
+            <p id="drive-sync-status" style="font-weight: bold;">🔌 Desconectado</p>
+            <div class="form-group">
+                <button id="btn-conectar-drive" onclick="conectarGoogleDrive(false)">🔗 Conectar Google Drive</button>
+                <button id="btn-sincronizar-drive-agora" class="oculto" onclick="sincronizarComDriveAgora()">🔄 Sincronizar agora</button>
+                <button id="btn-desconectar-drive" class="oculto" onclick="desconectarGoogleDrive()" style="background: var(--danger-color);">Desconectar</button>
+            </div>
         </section>
 
     </main>
+
+    <!-- Aviso não-bloqueante: aparece só quando outro aparelho sincronizou uma versão mais nova que a
+         local ENQUANTO essa aba já estava aberta/em uso — nunca aplica/recarrega sozinho (ver
+         sincronizarComDrive/avisarConflitoSincronizacaoDrive em script.js), pra não perder trabalho em
+         andamento sem perguntar. -->
+    <div id="drive-conflito-banner" class="oculto" style="position: fixed; left: 0; right: 0; bottom: 0; z-index: 9999; background: #222; color: #fff; padding: 12px 16px; text-align: center; box-shadow: 0 -2px 8px rgba(0,0,0,0.3);">
+        📡 Uma versão mais nova foi sincronizada de outro aparelho.
+        <button onclick="usarVersaoRemotaDrive()" style="margin-left: 8px;">Usar a versão nova</button>
+        <button onclick="manterVersaoLocalDrive()" style="background: var(--text-secondary); margin-left: 4px;">Manter esta e sobrescrever</button>
+    </div>
 
     <div id="calendario-dia-modal" class="modal-oculto">
         <div class="modal-content calendario-dia-modal-content">
