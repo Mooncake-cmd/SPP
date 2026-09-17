@@ -169,13 +169,26 @@ function salvarDados() {
     dados._syncMeta = { ultimaModificacaoEm: Date.now(), dispositivoId: obterIdDispositivoSync() };
     const { srsItems, ...dadosSemCards } = dados;
     localStorage.setItem("dados", JSON.stringify(dadosSemCards));
+    // NOVO: a gravação no IndexedDB continua "fire-and-forget" pra quem só quer salvar() e seguir em
+    // frente (é assim que quase toda ação do app chama isso) — mas devolve a promise pra quem PRECISA
+    // ter certeza de que terminou antes de continuar (ver comentário em salvar() logo abaixo: recarregar
+    // a página logo depois de importar um backup grande sem esperar essa gravação terminar perdia os
+    // cards silenciosamente — localStorage é síncrono e sempre completava a tempo, o IndexedDB não).
+    let promessaSrsItems = Promise.resolve();
     if (srsItemsAlterado) {
         srsItemsAlterado = false;
-        salvarSrsItemsIndexedDB(dados.srsItems).catch(err => console.error("Falha ao salvar os cards de SRS no IndexedDB:", err));
+        promessaSrsItems = salvarSrsItemsIndexedDB(dados.srsItems).catch(err => console.error("Falha ao salvar os cards de SRS no IndexedDB:", err));
     }
     agendarSincronizacaoDrive();
+    return promessaSrsItems;
 }
-function salvar() { salvarDados(); atualizar(); }
+// Retorna a mesma promise de salvarDados() — quem só chama salvar() e segue em frente (a grande
+// maioria dos ~90 lugares no app) nem precisa saber que ela existe, continua funcionando igual. Só
+// importa pra quem recarrega a página logo em seguida (ver importarDados/importarBackupComLivros/
+// aplicarDadosRemotosDrive) — esses agora fazem salvar().then(() => location.reload()) em vez de
+// chamar os dois em sequência sem esperar, pra garantir que os cards realmente foram gravados antes
+// de a página (e o array em memória) sumir.
+function salvar() { const promessa = salvarDados(); atualizar(); return promessa; }
 
 function isItemAtivoHoje(item) {
     if (!item.recorrencia || item.recorrencia.tipo !== 'semanal') return true;
@@ -6162,8 +6175,10 @@ function importarDados(e) {
                 // abaixo, esse conteúdo antigo era lido de volta e sobrescrevia silenciosamente os
                 // cards recém-importados — o backup parecia "não pegar" pro lado do SRS.
                 srsItemsAlterado = true;
-                salvar();
-                location.reload();
+                // NOVO: espera a gravação do SRS no IndexedDB terminar de verdade antes de recarregar
+                // (ver comentário em salvarDados()) — recarregar cedo demais perdia os cards em silêncio
+                // num backup grande, mesmo com o resto (RPG, finanças) intacto (localStorage é síncrono).
+                salvar().then(() => location.reload());
             }
         } catch (err) { alert("Erro no arquivo."); }
     };
@@ -6213,10 +6228,15 @@ function importarBackupComLivros(arquivo) {
             }));
         });
     }).then(() => {
-        salvar();
-        esconderProgressoOperacao();
-        alert("Backup restaurado com sucesso!");
-        location.reload();
+        // NOVO: espera a gravação do SRS no IndexedDB terminar de verdade antes de recarregar (ver
+        // comentário em salvarDados()) — era exatamente isso que fazia os cards não aparecerem depois
+        // de restaurar um backup grande (as centenas/milhares de cards), mesmo com o resto (RPG,
+        // finanças, livros) restaurado corretamente: o reload cortava a gravação do IndexedDB no meio.
+        return salvar().then(() => {
+            esconderProgressoOperacao();
+            alert("Backup restaurado com sucesso!");
+            location.reload();
+        });
     }).catch(err => {
         esconderProgressoOperacao();
         // NOVO: antes, um .zip sem dados.json dava o alert de "inválido" mas seguia em frente e
@@ -6377,8 +6397,9 @@ function enviarParaDrive(fileIdExistente, payload) {
 function aplicarDadosRemotosDrive(remoto) {
     dados = remoto;
     srsItemsAlterado = true;
-    salvar();
-    location.reload();
+    // NOVO: mesmo cuidado de importarDados/importarBackupComLivros — espera a gravação do SRS no
+    // IndexedDB terminar antes de recarregar, senão os cards vindos do Drive podiam se perder no reload.
+    salvar().then(() => location.reload());
 }
 
 // Ponto central: decide se sobe (local mais novo) ou baixa (remoto mais novo), nunca as duas coisas na
