@@ -6072,6 +6072,22 @@ function exportarComLivrosEmAndamento() {
     gerarBackupComLivros(dados.biblioteca.filter(l => !l.concluido));
 }
 
+// Processa uma lista de itens em lotes pequenos (em vez de todos de uma vez em paralelo) — evita ter
+// vários arquivos grandes (PDFs, imagens de card) na memória ao mesmo tempo, o que trava/congela a aba
+// em máquinas com pouca RAM. Compartilhado entre gerar (export) e restaurar (import) o backup com
+// livros — as duas direções leem/escrevem a mesma quantidade de arquivos potencialmente grandes.
+const TAMANHO_LOTE_ARQUIVOS_BACKUP = 3;
+function processarArquivosBackupEmLotes(itens, processarItem) {
+    let indice = 0;
+    function proximoLote() {
+        if (indice >= itens.length) return Promise.resolve();
+        const lote = itens.slice(indice, indice + TAMANHO_LOTE_ARQUIVOS_BACKUP);
+        indice += TAMANHO_LOTE_ARQUIVOS_BACKUP;
+        return Promise.all(lote.map(processarItem)).then(proximoLote);
+    }
+    return proximoLote();
+}
+
 function gerarBackupComLivros(livrosParaIncluirArquivo) {
     // NOVO: também inclui os áudios/vídeos dos cards (e as imagens/mídias "extras" de cards com mais
     // de uma no mesmo lado) — antes só as imagens principais entravam no backup, então áudio se perdia
@@ -6101,28 +6117,12 @@ function gerarBackupComLivros(livrosParaIncluirArquivo) {
     atualizarProgressoOperacao(0, totalEtapas, "💾", "Gerando backup...");
     const marcarEtapaConcluida = () => { etapasConcluidas++; atualizarProgressoOperacao(etapasConcluidas, totalEtapas, "💾", "Gerando backup..."); };
 
-    // NOVO: carrega os arquivos em lotes pequenos (em vez de todos os livros/imagens em paralelo de
-    // uma vez só) — evita ter, por exemplo, vários PDFs grandes na memória ao mesmo tempo, o que
-    // travava em máquinas com pouca RAM. O resultado continua sendo um único .zip no final; só a
-    // leitura dos arquivos fica espaçada em grupos pequenos.
-    const TAMANHO_LOTE = 3;
-    function processarEmLotes(itens, processarItem) {
-        let indice = 0;
-        function proximoLote() {
-            if (indice >= itens.length) return Promise.resolve();
-            const lote = itens.slice(indice, indice + TAMANHO_LOTE);
-            indice += TAMANHO_LOTE;
-            return Promise.all(lote.map(processarItem)).then(proximoLote);
-        }
-        return proximoLote();
-    }
-
-    processarEmLotes(livrosParaIncluirArquivo, livro =>
+    processarArquivosBackupEmLotes(livrosParaIncluirArquivo, livro =>
         carregarArquivoLivro(livro.id).then(arrayBuffer => {
             if (arrayBuffer) pastaLivros.file(`${livro.id}.bin`, arrayBuffer);
         }).catch(() => {}).finally(marcarEtapaConcluida)
     )
-        .then(() => processarEmLotes([...idsImagens], id =>
+        .then(() => processarArquivosBackupEmLotes([...idsImagens], id =>
             carregarImagemSRS(id).then(blob => {
                 if (blob) pastaImagens.file(`${id}.jpg`, blob);
             }).catch(() => {}).finally(marcarEtapaConcluida)
@@ -6173,9 +6173,18 @@ function importarDados(e) {
 function importarBackupComLivros(arquivo) {
     if (!confirm("Substituir dados e restaurar os arquivos deste backup?")) return;
 
+    // NOVO: barra de progresso (mesma infraestrutura do import de .apkg e do export desse mesmo
+    // backup, ver gerarBackupComLivros) + restauração em lotes pequenos em vez de todos os livros e
+    // imagens em paralelo de uma vez — sem isso, um .zip grande (várias dezenas/centenas de MB de PDF)
+    // parecia travado: "dados" já tinha sido trocado na memória (por isso telas que leem direto dele,
+    // como os gráficos de estatística, já mostravam o valor novo), mas nada tinha sido salvo de
+    // verdade ainda, sem nenhum indício na tela de quanto faltava.
+    mostrarProgressoOperacao("Lendo backup...", "📂");
+    atualizarProgressoOperacao(0, 1, "📂", "Lendo backup...");
+
     JSZip.loadAsync(arquivo).then(zip => {
         const arquivoDados = zip.file("dados.json");
-        if (!arquivoDados) { alert("Este .zip não parece ser um backup válido (falta o dados.json)."); return; }
+        if (!arquivoDados) throw new Error("BACKUP_SEM_DADOS_JSON");
 
         return arquivoDados.async("string").then(jsonTexto => {
             dados = JSON.parse(jsonTexto);
@@ -6187,22 +6196,36 @@ function importarBackupComLivros(arquivo) {
             const arquivosLivros = Object.keys(zip.files).filter(nome => nome.startsWith("livros/") && nome.toLowerCase().endsWith(".bin"));
             const arquivosImagens = Object.keys(zip.files).filter(nome => nome.startsWith("imagens_srs/") && nome.toLowerCase().endsWith(".jpg"));
 
-            const tarefasLivros = arquivosLivros.map(nomeArquivo => {
-                const id = nomeArquivo.slice("livros/".length, -4); // tira o prefixo e a extensão ".bin"
-                return zip.files[nomeArquivo].async("arraybuffer").then(buffer => salvarArquivoLivro(id, buffer));
-            });
-            const tarefasImagens = arquivosImagens.map(nomeArquivo => {
-                const id = nomeArquivo.slice("imagens_srs/".length, -4); // tira o prefixo e a extensão ".jpg"
-                return zip.files[nomeArquivo].async("blob").then(blob => salvarImagemSRS(id, blob));
-            });
+            const totalArquivos = arquivosLivros.length + arquivosImagens.length;
+            let arquivosConcluidos = 0;
+            atualizarProgressoOperacao(0, Math.max(totalArquivos, 1), "📂", "Restaurando arquivos...");
+            const marcarArquivoConcluido = () => {
+                arquivosConcluidos++;
+                atualizarProgressoOperacao(arquivosConcluidos, Math.max(totalArquivos, 1), "📂", "Restaurando arquivos...");
+            };
 
-            return Promise.all([...tarefasLivros, ...tarefasImagens]);
+            return processarArquivosBackupEmLotes(arquivosLivros, nomeArquivo => {
+                const id = nomeArquivo.slice("livros/".length, -4); // tira o prefixo e a extensão ".bin"
+                return zip.files[nomeArquivo].async("arraybuffer").then(buffer => salvarArquivoLivro(id, buffer)).finally(marcarArquivoConcluido);
+            }).then(() => processarArquivosBackupEmLotes(arquivosImagens, nomeArquivo => {
+                const id = nomeArquivo.slice("imagens_srs/".length, -4); // tira o prefixo e a extensão ".jpg"
+                return zip.files[nomeArquivo].async("blob").then(blob => salvarImagemSRS(id, blob)).finally(marcarArquivoConcluido);
+            }));
         });
     }).then(() => {
         salvar();
+        esconderProgressoOperacao();
         alert("Backup restaurado com sucesso!");
         location.reload();
     }).catch(err => {
+        esconderProgressoOperacao();
+        // NOVO: antes, um .zip sem dados.json dava o alert de "inválido" mas seguia em frente e
+        // mostrava "restaurado com sucesso" logo em seguida (o "return" só saía do .then interno, a
+        // cadeia inteira continuava) — agora um throw de verdade interrompe tudo e cai só aqui.
+        if (err && err.message === "BACKUP_SEM_DADOS_JSON") {
+            alert("Este .zip não parece ser um backup válido (falta o dados.json).");
+            return;
+        }
         console.error("Erro ao importar backup:", err);
         alert("Não foi possível importar este backup. Verifique se o arquivo não está corrompido.");
     });
