@@ -6220,7 +6220,7 @@ function importarBackupComLivros(arquivo) {
 // usuário. O token de acesso fica só em memória (nunca em localStorage, que já guarda dado sensível
 // do app) — some ao recarregar a página; tentarReconectarDriveAoCarregar tenta renovar em silêncio
 // (sem popup) usando o consentimento já dado antes, e só volta a pedir clique se isso falhar.
-const GOOGLE_CLIENT_ID = "COLE_AQUI_O_CLIENT_ID.apps.googleusercontent.com"; // criado no Google Cloud Console
+const GOOGLE_CLIENT_ID = "117501646661-8eo6c40qfac39r4s8vb9sbr1dsc8n6ue.apps.googleusercontent.com"; // criado no Google Cloud Console ("Google Auth Platform" → Clientes)
 const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 const GOOGLE_DRIVE_ARQUIVO_NOME = "spp_sync.json";
 const SYNC_DRIVE_DEBOUNCE_MS = 20000; // espera 20s sem nenhuma mudança nova antes de subir pro Drive
