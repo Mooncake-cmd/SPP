@@ -598,14 +598,17 @@
             <hr style="margin: 16px 0; border-color: var(--border-color);">
             <h3 style="margin-bottom: 8px;">Sincronização automática (Google Drive)</h3>
             <p style="color: var(--text-secondary); font-size: 0.85em; margin-top: 0;">
-                Sincroniza RPG, finanças e os cards de revisão entre os aparelhos onde você conectar a mesma
-                conta Google. Os PDFs da Biblioteca e as imagens dos cards NÃO entram aqui — continue usando
-                o Exportar/Importar Backup pra esses arquivos.
+                Sincroniza RPG, finanças e os cards de revisão (texto/estrutura) automaticamente entre os
+                aparelhos onde você conectar a mesma conta Google. Os PDFs da Biblioteca continuam só no
+                Exportar/Importar Backup. As imagens/áudios dos cards NÃO sobem automático — use o botão
+                "Sincronizar mídia" abaixo quando quiser (pode ser bastante dado); pra baixar, cada card
+                busca sua própria mídia sozinho na revisão, se ela não existir ainda nesse aparelho.
             </p>
             <p id="drive-sync-status" style="font-weight: bold;">🔌 Desconectado</p>
             <div class="form-group">
                 <button id="btn-conectar-drive" onclick="conectarGoogleDrive(false)">🔗 Conectar Google Drive</button>
                 <button id="btn-sincronizar-drive-agora" class="oculto" onclick="sincronizarComDriveAgora()">🔄 Sincronizar agora</button>
+                <button id="btn-sincronizar-midia-drive" class="oculto" onclick="sincronizarMidiaComDriveAgora()">🖼️ Sincronizar mídia</button>
                 <button id="btn-desconectar-drive" class="oculto" onclick="desconectarGoogleDrive()" style="background: var(--danger-color);">Desconectar</button>
             </div>
         </section>

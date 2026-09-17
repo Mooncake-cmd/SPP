@@ -166,7 +166,10 @@ function salvarDados() {
     // NOVO: timestamp de "última mudança local" (ver "SINCRONIZAÇÃO COM GOOGLE DRIVE" mais abaixo) —
     // atualizado em TODA salvarDados() (ela só é chamada quando algo de fato mudou, é a convenção já
     // usada em todo o resto do app), ANTES de destructurar "dados" pra já ir junto no JSON salvo.
-    dados._syncMeta = { ultimaModificacaoEm: Date.now(), dispositivoId: obterIdDispositivoSync() };
+    // Object.assign (não substituição direta) preserva outras chaves que já possam estar em
+    // _syncMeta — como midiaSincronizada (ver "MÍDIA DOS CARDS NO GOOGLE DRIVE"), que senão seria
+    // apagada por essa mesma chamada sempre que sincronizarMidiaComDriveAgora chama salvar() em seguida.
+    dados._syncMeta = Object.assign({}, dados._syncMeta, { ultimaModificacaoEm: Date.now(), dispositivoId: obterIdDispositivoSync() });
     const { srsItems, ...dadosSemCards } = dados;
     localStorage.setItem("dados", JSON.stringify(dadosSemCards));
     // NOVO: a gravação no IndexedDB continua "fire-and-forget" pra quem só quer salvar() e seguir em
@@ -1384,18 +1387,50 @@ function fecharModalTemasSRS() { document.getElementById("srs-temas-modal").clas
 
 // Apaga do IndexedDB as imagens/áudios anexados a um card SRS (chamado antes de remover o card dos
 // dados, senão o arquivo fica órfão guardado pra sempre, ocupando espaço à toa).
+// Extrai os ids de mídia (data-srs-img-id="..."/data-srs-midia-id="...") embutidos dentro do HTML rico
+// de um campo — é assim que cards importados do Anki guardam a mídia (ver renderizarTemplateAnkiComHtmlRico/
+// extrairCampoAnkiComoHtml), diferente dos campos separados tipo midiaPerguntaId usados por cards
+// criados manualmente na interface do app.
+function idsMidiaEmHtmlRico(html) {
+    if (!html) return [];
+    const ids = [];
+    const regex = /data-srs-(?:img|midia)-id="([^"]+)"/g;
+    let m;
+    while ((m = regex.exec(html)) !== null) ids.push(m[1]);
+    return ids;
+}
+
 // Todos os ids de imagem/mídia (áudio/vídeo) que um card SRS pode ter — o campo singular de sempre
-// mais as "extras" (cards importados do Anki com mais de uma imagem/áudio no mesmo lado).
+// mais as "extras" (cards criados manualmente com mais de uma imagem/áudio no mesmo lado), MAIS
+// (NOVO) os embutidos no HTML rico dos campos de cards importados do Anki (camposFrente/camposVerso/
+// frenteTemplateHtml/versoTemplateHtml) — antes essa função só via os campos antigos, então a mídia de
+// decks do Anki nunca entrava no backup completo (gerarBackupComLivros) nem seria sincronizada com o
+// Drive. Dedup com Set porque o mesmo id pode aparecer tanto em camposFrente quanto em
+// frenteTemplateHtml (os dois guardam o mesmo HTML rico, em formatos diferentes).
 function todosIdsMidiaDoCardSRS(card) {
-    return [
+    const idsCamposAntigos = [
         card.imagemPerguntaId, ...(card.imagensExtrasPerguntaIds || []),
         card.imagemRespostaId, ...(card.imagensExtrasRespostaIds || []),
         card.midiaPerguntaId, ...(card.midiasExtrasPerguntaIds || []).map(m => m.id),
         card.midiaRespostaId, ...(card.midiasExtrasRespostaIds || []).map(m => m.id)
     ].filter(Boolean);
+    const idsHtmlRico = [
+        ...(card.camposFrente || []).flatMap(c => idsMidiaEmHtmlRico(c.html)),
+        ...(card.camposVerso || []).flatMap(c => idsMidiaEmHtmlRico(c.html)),
+        ...idsMidiaEmHtmlRico(card.frenteTemplateHtml),
+        ...idsMidiaEmHtmlRico(card.versoTemplateHtml)
+    ];
+    return [...new Set([...idsCamposAntigos, ...idsHtmlRico])];
 }
 function excluirMidiasDoCardSRS(card) {
-    return Promise.all(todosIdsMidiaDoCardSRS(card).map(id => excluirImagemSRS(id).catch(() => {})));
+    const ids = todosIdsMidiaDoCardSRS(card);
+    const exclusoesLocais = ids.map(id => excluirImagemSRS(id).catch(() => {}));
+    // NOVO: se a mídia foi sincronizada com o Drive (ver "MÍDIA DOS CARDS NO GOOGLE DRIVE"), apaga lá
+    // também — senão o arquivo remoto fica órfão pra sempre. Só tenta quando conectado; falhar aqui
+    // (offline, sem permissão) nunca deve travar a exclusão local, que é o que importa na hora pro
+    // usuário — por isso cada exclusão remota tem seu próprio .catch(), independente das outras.
+    const exclusoesDrive = driveConectado ? ids.map(id => excluirMidiaDoDrive(id).catch(() => {})) : [];
+    return Promise.all([...exclusoesLocais, ...exclusoesDrive]);
 }
 
 // NOVO: remove do histórico de revisões (dados.srsRevisoesLog) as entradas de cards que acabaram de
@@ -2695,7 +2730,10 @@ function resolverMidiaInlineNoContainer(container) {
     const tarefas = [];
 
     container.querySelectorAll("img[data-srs-img-id]").forEach(img => {
-        tarefas.push(carregarImagemSRS(img.getAttribute("data-srs-img-id")).then(blob => {
+        // NOVO: carregarImagemSRSComFallbackDrive busca no Drive quando falta localmente (card
+        // chegou por sincronização, mídia ainda não baixada nesse aparelho) — ver "MÍDIA DOS CARDS NO
+        // GOOGLE DRIVE". Sem conexão com o Drive, se comporta exatamente como carregarImagemSRS puro.
+        tarefas.push(carregarImagemSRSComFallbackDrive(img.getAttribute("data-srs-img-id")).then(blob => {
             if (!blob) return;
             const url = URL.createObjectURL(blob);
             urls.push(url);
@@ -2705,7 +2743,7 @@ function resolverMidiaInlineNoContainer(container) {
 
     container.querySelectorAll("[data-srs-midia-id]").forEach(span => {
         const tipo = span.getAttribute("data-srs-midia-tipo");
-        tarefas.push(carregarImagemSRS(span.getAttribute("data-srs-midia-id")).then(blob => {
+        tarefas.push(carregarImagemSRSComFallbackDrive(span.getAttribute("data-srs-midia-id")).then(blob => {
             if (!blob) return;
             const url = URL.createObjectURL(blob);
             urls.push(url);
@@ -6465,18 +6503,166 @@ function atualizarUiSincronizacaoDrive() {
     const btnConectar = document.getElementById("btn-conectar-drive");
     const btnDesconectar = document.getElementById("btn-desconectar-drive");
     const btnSyncAgora = document.getElementById("btn-sincronizar-drive-agora");
+    const btnSyncMidia = document.getElementById("btn-sincronizar-midia-drive");
     if (driveConectado) {
         const ultima = driveUltimaSincronizacaoEm ? new Date(driveUltimaSincronizacaoEm).toLocaleTimeString("pt-BR") : "ainda não sincronizou";
         status.textContent = `✅ Conectado — última sincronização: ${ultima}`;
         btnConectar.classList.add("oculto");
         btnDesconectar.classList.remove("oculto");
         btnSyncAgora.classList.remove("oculto");
+        btnSyncMidia.classList.remove("oculto");
     } else {
         status.textContent = "🔌 Desconectado";
         btnConectar.classList.remove("oculto");
         btnDesconectar.classList.add("oculto");
         btnSyncAgora.classList.add("oculto");
+        btnSyncMidia.classList.add("oculto");
     }
+}
+
+// ============================================================
+// === MÍDIA DOS CARDS NO GOOGLE DRIVE (upload manual + download sob demanda) ===
+// ============================================================
+// Continuação da sincronização acima: diferente de dados/srsItems (que sobem sozinhos, debounced), a
+// mídia (imagens/áudio dos cards) fica numa pasta própria no Drive e só sobe quando o usuário pede
+// explicitamente (botão "Sincronizar mídia agora") — pode ser centenas de MB (áudio de decks de
+// idioma, muitas imagens), e subir isso automático a cada mudança seria pesado demais, principalmente
+// pelo plano de dados do celular. Download continua sob demanda: só busca a mídia de um card
+// específico quando ele aparece na revisão e não existe localmente (ver
+// carregarImagemSRSComFallbackDrive) — nunca baixa a biblioteca de mídia inteira de uma vez.
+const GOOGLE_DRIVE_PASTA_MIDIA_NOME = "spp_midia_cards";
+let driveIdPastaMidiaCache = null;
+
+// Variante de chamarApiDrive pra quando a RESPOSTA é o conteúdo binário em si (?alt=media), não JSON.
+function chamarApiDriveBlob(url, opcoes) {
+    return fetch(url, Object.assign({}, opcoes, {
+        headers: Object.assign({ Authorization: `Bearer ${googleAccessToken}` }, (opcoes && opcoes.headers) || {})
+    })).then(r => {
+        if (!r.ok) throw new Error(`Drive API respondeu ${r.status}`);
+        return r.blob();
+    });
+}
+
+function obterPastaMidiaDrive() {
+    if (driveIdPastaMidiaCache) return Promise.resolve(driveIdPastaMidiaCache);
+    const query = encodeURIComponent(`name='${GOOGLE_DRIVE_PASTA_MIDIA_NOME}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+    return chamarApiDrive(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id)`).then(j => {
+        const pasta = j.files && j.files[0];
+        if (pasta) { driveIdPastaMidiaCache = pasta.id; return pasta.id; }
+        return chamarApiDrive("https://www.googleapis.com/drive/v3/files?fields=id", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: GOOGLE_DRIVE_PASTA_MIDIA_NOME, mimeType: "application/vnd.google-apps.folder" })
+        }).then(j2 => { driveIdPastaMidiaCache = j2.id; return j2.id; });
+    });
+}
+
+// Cada mídia vira 1 arquivo no Drive, nomeado pelo próprio id (mesmo id usado no IndexedDB local) —
+// dá pra achar de volta só pelo nome, sem precisar guardar um mapa id→fileId em lugar nenhum.
+function buscarArquivoMidiaDrive(id) {
+    return obterPastaMidiaDrive().then(pastaId => {
+        const query = encodeURIComponent(`name='${id}' and '${pastaId}' in parents and trashed=false`);
+        return chamarApiDrive(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id)`).then(j => (j.files && j.files[0] && j.files[0].id) || null);
+    });
+}
+
+function enviarMidiaParaDrive(id, blob) {
+    const mimeType = blob.type || "application/octet-stream";
+    return obterPastaMidiaDrive().then(pastaId =>
+        buscarArquivoMidiaDrive(id).then(fileIdExistente => {
+            if (fileIdExistente) {
+                return chamarApiDrive(`https://www.googleapis.com/upload/drive/v3/files/${fileIdExistente}?uploadType=media`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": mimeType },
+                    body: blob
+                }).then(() => fileIdExistente);
+            }
+            // Corpo do multipart montado como Blob (não string) — concatenar bytes binários numa
+            // string quebraria o conteúdo; Blob preserva os bytes de verdade nas partes que são Blob.
+            const boundary = `sppmidia${Date.now()}`;
+            const metadata = { name: id, parents: [pastaId], mimeType };
+            const corpo = new Blob([
+                `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`,
+                `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`,
+                blob,
+                `\r\n--${boundary}--`
+            ]);
+            return chamarApiDrive("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {
+                method: "POST",
+                headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+                body: corpo
+            }).then(j => j.id);
+        })
+    );
+}
+
+function baixarMidiaDoDrive(id) {
+    return buscarArquivoMidiaDrive(id).then(fileId => {
+        if (!fileId) return null;
+        return chamarApiDriveBlob(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+    });
+}
+
+function excluirMidiaDoDrive(id) {
+    return buscarArquivoMidiaDrive(id).then(fileId => {
+        if (!fileId) return;
+        return chamarApiDrive(`https://www.googleapis.com/drive/v3/files/${fileId}`, { method: "DELETE" });
+    });
+}
+
+// NOVO: quando a imagem/mídia não existe localmente (ex: o card chegou por sincronização de outro
+// aparelho, mas a mídia em si nunca foi baixada NESSE aparelho), tenta buscar no Drive antes de
+// desistir — só quando conectado. Ao achar, salva localmente (cache) pra não precisar buscar de novo
+// da próxima vez que esse card aparecer na revisão.
+function carregarImagemSRSComFallbackDrive(id) {
+    return carregarImagemSRS(id).then(blob => {
+        if (blob) return blob;
+        if (!driveConectado || !googleAccessToken) return null;
+        return baixarMidiaDoDrive(id).then(blobRemoto => {
+            if (!blobRemoto) return null;
+            return salvarImagemSRS(id, blobRemoto).then(() => blobRemoto).catch(() => blobRemoto);
+        }).catch(() => null);
+    });
+}
+
+// Sobe pro Drive toda mídia referenciada por algum card que ainda não está no manifesto
+// (dados._syncMeta.midiaSincronizada) — chamado só pelo botão "Sincronizar mídia agora", nunca
+// automático (ver comentário no topo desta seção). Ids sem blob local (nunca baixados nesse aparelho)
+// são pulados silenciosamente — não tem o que subir. Reaproveita a mesma barra de progresso e o mesmo
+// processamento em lotes já usados na importação/exportação de backup.
+function sincronizarMidiaComDriveAgora() {
+    if (!driveConectado) { alert("Conecte o Google Drive primeiro."); return; }
+    const todosIds = new Set();
+    dados.srsItems.forEach(item => todosIdsMidiaDoCardSRS(item).forEach(id => todosIds.add(id)));
+    const jaSincronizados = new Set((dados._syncMeta && dados._syncMeta.midiaSincronizada) || []);
+    const pendentes = [...todosIds].filter(id => !jaSincronizados.has(id));
+
+    if (pendentes.length === 0) { alert("Nenhuma mídia nova pra sincronizar."); return; }
+
+    mostrarProgressoOperacao("Sincronizando mídia...", "🖼️");
+    atualizarProgressoOperacao(0, pendentes.length, "🖼️", "Sincronizando mídia...");
+    let concluidos = 0;
+    const enviados = [];
+    processarArquivosBackupEmLotes(pendentes, id =>
+        carregarImagemSRS(id).then(blob => {
+            if (!blob) return;
+            return enviarMidiaParaDrive(id, blob).then(() => { enviados.push(id); });
+        }).catch(err => console.error(`Falha ao sincronizar mídia ${id}:`, err)).finally(() => {
+            concluidos++;
+            atualizarProgressoOperacao(concluidos, pendentes.length, "🖼️", "Sincronizando mídia...");
+        })
+    ).then(() => {
+        if (!dados._syncMeta) dados._syncMeta = {};
+        dados._syncMeta.midiaSincronizada = [...jaSincronizados, ...enviados];
+        return salvar();
+    }).then(() => {
+        esconderProgressoOperacao();
+        alert(`${enviados.length} de ${pendentes.length} mídia(s) sincronizada(s) com o Drive.`);
+    }).catch(err => {
+        console.error("Erro ao sincronizar mídia com o Drive:", err);
+        esconderProgressoOperacao();
+        alert("Não foi possível sincronizar a mídia. Tente novamente.");
+    });
 }
 
 // ============================================================
