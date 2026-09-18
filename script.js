@@ -3509,6 +3509,11 @@ function processarRevisaoSRS(qualidade) {
     salvarDados();
     carregarRevisaoSRS();
     atualizarEstatisticasSRS();
+    // NOVO: só reconstrói o Deck Completo quando o filtro "revisados hoje" está ativo — é o único caso
+    // em que o card que acabou de ser respondido pode precisar aparecer/mudar de posição na lista
+    // agora mesmo. Fora disso, continua sem chamar renderizarListaSRS() aqui, pelo motivo explicado
+    // acima (evita o travamento em decks grandes).
+    if (srsListaFiltroRevisadosHoje) renderizarListaSRS();
 }
 
 // Quantos cards NUNCA revisados antes (intervalo_anterior === 0 no log) já foram estudados hoje, no
@@ -3656,17 +3661,52 @@ function mudarPaginaListaSRS(delta) {
     renderizarListaSRS();
     document.getElementById("lista-srs-completa")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+// NOVO: ids dos cards revisados HOJE, sem repetir (um card revisado 3x hoje conta 1 vez) — usado pelo
+// filtro "Mostrar só revisados hoje" do Deck Completo. Reaproveita dados.srsRevisoesLog, a mesma fonte
+// já usada nas estatísticas de total de revisões/cards únicos.
+function idsCardsRevisadosHoje() {
+    const hojeData = hojeISO();
+    return new Set(dados.srsRevisoesLog.filter(r => r.data === hojeData).map(r => r.cardId));
+}
+
+let srsListaFiltroRevisadosHoje = false;
+function alternarFiltroRevisadosHojeSRS() {
+    srsListaFiltroRevisadosHoje = !srsListaFiltroRevisadosHoje;
+    srsListaPaginaAtual = 1;
+    renderizarListaSRS();
+}
 function renderizarListaSRS() {
     const lista = document.getElementById("lista-srs-completa");
     if(!lista) return;
     if (elementoEmEdicaoDentroDe("lista-srs-completa")) return; // não reconstrói enquanto edita um card aqui
     dados.srsItems.sort((a,b) => a.tema.localeCompare(b.tema));
 
-    const totalPaginas = Math.max(1, Math.ceil(dados.srsItems.length / SRS_LISTA_TAMANHO_PAGINA));
+    // NOVO: filtro "Mostrar só revisados hoje" — aplica ANTES da paginação, então o resto da função
+    // (contagem de páginas, texto "X cards no total") já opera sobre o conjunto filtrado sem precisar
+    // saber que o filtro existe.
+    const itensBase = srsListaFiltroRevisadosHoje
+        ? dados.srsItems.filter(i => idsCardsRevisadosHoje().has(i.id))
+        : dados.srsItems;
+
+    const btnFiltro = document.getElementById("btn-filtro-revisados-hoje-srs");
+    if (btnFiltro) {
+        const qtdHoje = idsCardsRevisadosHoje().size;
+        btnFiltro.textContent = srsListaFiltroRevisadosHoje
+            ? `✅ Mostrando só revisados hoje (${qtdHoje}) — clique pra ver todos`
+            : `👁️ Mostrar só revisados hoje (${qtdHoje})`;
+    }
+
+    if (srsListaFiltroRevisadosHoje && itensBase.length === 0) {
+        lista.innerHTML = "<p class='biblioteca-vazio'>Nenhum card revisado hoje ainda.</p>";
+        return;
+    }
+
+    const totalPaginas = Math.max(1, Math.ceil(itensBase.length / SRS_LISTA_TAMANHO_PAGINA));
     if (srsListaPaginaAtual > totalPaginas) srsListaPaginaAtual = totalPaginas;
     if (srsListaPaginaAtual < 1) srsListaPaginaAtual = 1;
     const inicio = (srsListaPaginaAtual - 1) * SRS_LISTA_TAMANHO_PAGINA;
-    const itensDaPagina = dados.srsItems.slice(inicio, inicio + SRS_LISTA_TAMANHO_PAGINA);
+    const itensDaPagina = itensBase.slice(inicio, inicio + SRS_LISTA_TAMANHO_PAGINA);
 
     // NOVO: monta tudo num array e junta uma vez só no final, em vez de "lista.innerHTML += ..." a
     // cada card — esse padrão é O(n²) (o navegador reserializa/reparseia o HTML acumulado inteiro a
@@ -3695,7 +3735,7 @@ function renderizarListaSRS() {
     if (totalPaginas > 1) {
         partesHtml.push(`<div class="srs-lista-paginacao">
             <button onclick="mudarPaginaListaSRS(-1)" ${srsListaPaginaAtual === 1 ? "disabled" : ""}>◀ Anterior</button>
-            <span>Página ${srsListaPaginaAtual} de ${totalPaginas} (${dados.srsItems.length} cards no total)</span>
+            <span>Página ${srsListaPaginaAtual} de ${totalPaginas} (${itensBase.length} card(s))</span>
             <button onclick="mudarPaginaListaSRS(1)" ${srsListaPaginaAtual === totalPaginas ? "disabled" : ""}>Próxima ▶</button>
         </div>`);
     }

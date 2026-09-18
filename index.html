@@ -378,7 +378,10 @@
             <section class="card">
                 <h3>🗂️ Deck Completo</h3>
                 <p id="srs-estatisticas" class="srs-estatisticas"></p>
-                <button onclick="abrirModalExcluirTemasSRS()" style="background: var(--danger-color); margin-bottom: 10px;">🗑️ Excluir vários temas</button>
+                <div class="form-group" style="margin-bottom: 10px;">
+                    <button id="btn-filtro-revisados-hoje-srs" onclick="alternarFiltroRevisadosHojeSRS()">👁️ Mostrar só revisados hoje</button>
+                    <button onclick="abrirModalExcluirTemasSRS()" style="background: var(--danger-color);">🗑️ Excluir vários temas</button>
+                </div>
                 <div id="lista-srs-completa" class="srs-lista-container"></div>
             </section>
         </div>
