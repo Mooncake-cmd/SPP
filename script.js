@@ -3627,7 +3627,14 @@ function atualizarEstatisticasSRS() {
     // não faz mais sentido aqui — cada tema tem seu próprio Y. Essa linha só mostra o total de novos
     // estudados hoje somando todos os temas; o detalhe por tema fica no modal "⚙️ Limites por tema".
     const novosHoje = contarNovosEstudadosHoje();
-    el.innerText = `${total} card(s) no total · ${paraHoje} para revisar hoje · ${dominados} dominado(s) (intervalo > 30 dias) · ${novosHoje} novo(s) hoje`;
+    // NOVO: duas medidas diferentes sobre dados.srsRevisoesLog — "revisões" conta toda vez que você
+    // respondeu Difícil/Bom/Fácil (revisar o mesmo card 5x soma 5), "cards únicos" conta cada card só
+    // 1x não importa quantas vezes foi revisado (dedup por cardId via Set). Como o log já perde as
+    // entradas de cards excluídos (ver removerEntradasLogSRS), as duas contagens caem junto quando um
+    // tema é excluído — comportamento esperado, não um bug.
+    const totalRevisoes = dados.srsRevisoesLog.length;
+    const cardsUnicosRevisados = new Set(dados.srsRevisoesLog.map(r => r.cardId)).size;
+    el.innerText = `${total} card(s) no total · ${paraHoje} para revisar hoje · ${dominados} dominado(s) (intervalo > 30 dias) · ${novosHoje} novo(s) hoje · ${totalRevisoes} revisão(ões) no total · ${cardsUnicosRevisados} card(s) único(s) já revisado(s)`;
 }
 
 function atualizarLimiteNovosSRS(valor) {
