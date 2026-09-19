@@ -6352,6 +6352,11 @@ const GOOGLE_CLIENT_ID = "117501646661-8eo6c40qfac39r4s8vb9sbr1dsc8n6ue.apps.goo
 const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 const GOOGLE_DRIVE_ARQUIVO_NOME = "spp_sync.json";
 const SYNC_DRIVE_DEBOUNCE_MS = 20000; // espera 20s sem nenhuma mudança nova antes de subir pro Drive
+// NOVO: verificação periódica enquanto a aba fica aberta e conectada — sem isso, um aparelho parado
+// (sem nenhuma edição local) nunca descobre sozinho que outro aparelho sincronizou algo mais novo,
+// já que agendarSincronizacaoDrive só dispara em reação a uma mudança local (ver setInterval mais
+// abaixo, perto de inicializarAppComSrsItems).
+const SYNC_DRIVE_POLL_INTERVAL_MS = 120000; // a cada 2 minutos
 
 let googleTokenClient = null;
 let googleAccessToken = null;
@@ -6435,7 +6440,10 @@ function aguardarGoogleCarregado(callback, tentativas) {
 }
 
 function chamarApiDrive(url, opcoes) {
-    return fetch(url, Object.assign({}, opcoes, {
+    // NOVO: cache "no-store" — sem isso, o navegador podia devolver uma resposta antiga guardada em
+    // cache pra essa mesma URL (ex: o GET do arquivo de sincronização) em vez de buscar o conteúdo
+    // realmente atual no Drive, fazendo o app achar que não tinha nada novo quando na verdade tinha.
+    return fetch(url, Object.assign({ cache: "no-store" }, opcoes, {
         headers: Object.assign({ Authorization: `Bearer ${googleAccessToken}` }, (opcoes && opcoes.headers) || {})
     })).then(r => {
         if (!r.ok) throw new Error(`Drive API respondeu ${r.status}`);
@@ -6582,7 +6590,7 @@ let driveIdPastaMidiaCache = null;
 
 // Variante de chamarApiDrive pra quando a RESPOSTA é o conteúdo binário em si (?alt=media), não JSON.
 function chamarApiDriveBlob(url, opcoes) {
-    return fetch(url, Object.assign({}, opcoes, {
+    return fetch(url, Object.assign({ cache: "no-store" }, opcoes, {
         headers: Object.assign({ Authorization: `Bearer ${googleAccessToken}` }, (opcoes && opcoes.headers) || {})
     })).then(r => {
         if (!r.ok) throw new Error(`Drive API respondeu ${r.status}`);
@@ -6870,6 +6878,22 @@ function inicializarAppComSrsItems() {
     atualizar();
     inicializarCalendario();
     tentarReconectarDriveAoCarregar(); // fire-and-forget: nunca atrasa o 1º render do app
+
+    // NOVO: checagem periódica do Drive (ver SYNC_DRIVE_POLL_INTERVAL_MS) — sincronizarComDrive() já
+    // não faz nada se driveConectado for false, então um setInterval único e incondicional é
+    // suficiente (não precisa start/stop ao conectar/desconectar). Cobre o aparelho que fica parado
+    // (sem nenhuma edição local) e por isso nunca teria motivo pra checar sozinho — ver comentário na
+    // declaração da constante.
+    setInterval(() => { if (driveConectado) sincronizarComDrive(); }, SYNC_DRIVE_POLL_INTERVAL_MS);
+
+    // NOVO: checa assim que a aba volta a ficar visível (ex: o usuário trocou de app no celular e
+    // voltou) — navegadores móveis costumam pausar/atrasar setTimeout/setInterval de abas em segundo
+    // plano, então o agendamento de 20s (agendarSincronizacaoDrive) ou até o polling periódico acima
+    // podem simplesmente não ter rodado enquanto a aba estava em background; isso força uma checagem
+    // imediata no momento em que ela volta a ficar ativa, em vez de esperar o próximo timer.
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible" && driveConectado) sincronizarComDrive();
+    });
 
     // NOVO: mantém o contador do Pacto do Tártaro correndo em tempo real enquanto a aba fica aberta —
     // a cada segundo, ou só atualiza o texto dos contadores já na tela, ou (se algum chefão completou
