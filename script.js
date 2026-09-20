@@ -1813,6 +1813,9 @@ function importarApkg(event) {
                 if (resumo.notasComLatex) {
                     msg += `\n🧮 ${resumo.notasComLatex} card(s) com fórmula LaTeX não renderizada (aparece como texto cru, ex: "[$]x^2[/$]")`;
                 }
+                if (resumo.versoVazio) {
+                    msg += `\n📭 ${resumo.versoVazio} card(s) importado(s) com o verso (resposta) vazio — igual acontece no Anki de verdade quando só a frente tem conteúdo (ex: campo de tradução ainda não preenchido, ou card "divisor" sem resposta por design do deck)`;
+                }
                 if (resumo.exemplosFalha.length > 0) {
                     msg += `\n\nExemplos de erro (copie esse texto e cole na conversa se quiser que eu investigue):\n- ${resumo.exemplosFalha.join("\n- ")}`;
                 }
@@ -2171,6 +2174,8 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
                 cards.forEach(card => {
                     if (card._midiaNaoSuportada) resumo.midiaNaoSuportada++;
                     delete card._midiaNaoSuportada;
+                    if (card._versoVazio) resumo.versoVazio = (resumo.versoVazio || 0) + 1;
+                    delete card._versoVazio;
                     dados.srsItems.push(card);
                     resumo.sucesso++;
                 });
@@ -2942,8 +2947,15 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         // "sem conteúdo" só por essa limitação do pipeline antigo — mesma lógica já usada pra imagem
         // empacotada normal (ver comentário de aplicarMidiasExtraidasNoCard).
         const frenteVazia = !frenteHtml.trim() && imagensFrente.length === 0 && midiasFrente.length === 0 && !frenteTemConteudoRico;
+        // NOVO: o Anki de verdade só exige que a FRENTE (qfmt) tenha conteúdo pra gerar o card — o verso
+        // pode ficar vazio (campo de tradução ainda não preenchido, ou um afmt propositalmente sem nada
+        // além do que a frente já mostra, comum em cards "divisor"/introdução) e o card mesmo assim
+        // existe e aparece na fila do Anki, só com a tela de resposta em branco. Rejeitar esses cards
+        // (como fazíamos antes, exigindo os dois lados) descartava silenciosamente cards legítimos do
+        // deck. Continua rejeitando quando a FRENTE está vazia — aí sim não haveria nada pra mostrar/
+        // revisar, então não existe card de verdade pra importar.
         const versoVazio = !versoHtml.trim() && imagensVerso.length === 0 && midiasVerso.length === 0 && !versoTemConteudoRico;
-        if (frenteVazia || versoVazio) throw new Error(`Frente ou Verso sem nenhum conteúdo depois de renderizar o template do Anki (modelo "${modelo.name || "sem nome"}"). Frente: "${frenteHtml.slice(0, 60)}" | Verso: "${versoHtml.slice(0, 60)}"`);
+        if (frenteVazia) throw new Error(`Frente sem nenhum conteúdo depois de renderizar o template do Anki (modelo "${modelo.name || "sem nome"}"). Frente: "${frenteHtml.slice(0, 60)}"`);
 
         const card = {
             id: Date.now() + Math.floor(Math.random() * 1000000),
@@ -2957,6 +2969,7 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         aplicarMidiasExtraidasNoCard(card, "Pergunta", { imagens: imagensFrente, midias: midiasFrente });
         aplicarMidiasExtraidasNoCard(card, "Resposta", { imagens: imagensVerso, midias: midiasVerso });
         card._midiaNaoSuportada = midiaNaoSuportada;
+        card._versoVazio = versoVazio;
 
         // NOVO: além do subtema/resposta em texto puro acima (mantidos por compatibilidade — busca,
         // edição de card, lista, backup continuam funcionando igual), monta também um HTML rico por
@@ -3043,8 +3056,11 @@ function converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaInd
         extrairMidiaDoCampo(campoVerso, zip, nomeParaIndice)
     ]).then(([frente, verso]) => {
         const frenteVazia = !frente.texto.trim() && frente.imagens.length === 0 && frente.midias.length === 0;
+        // NOVO: ver comentário equivalente em converterNotaComTemplateAnki — o Anki só exige a FRENTE
+        // preenchida pra gerar o card; verso vazio é aceito (campo de resposta ainda não preenchido, por
+        // exemplo), em vez de rejeitar o card inteiro.
         const versoVazio = !verso.texto.trim() && verso.imagens.length === 0 && verso.midias.length === 0;
-        if (frenteVazia || versoVazio) throw new Error(`Frente ou Verso sem nenhum conteúdo (nem texto, nem imagem/mídia). Frente: "${campoFrente.slice(0, 60)}" | Verso: "${campoVerso.slice(0, 60)}"`);
+        if (frenteVazia) throw new Error(`Frente sem nenhum conteúdo (nem texto, nem imagem/mídia). Frente: "${campoFrente.slice(0, 60)}"`);
         const card = {
             id: Date.now() + Math.floor(Math.random() * 1000000),
             tema: tema, subtema: frente.texto, resposta: verso.texto, tipo: "normal",
@@ -3053,6 +3069,7 @@ function converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaInd
         aplicarMidiasExtraidasNoCard(card, "Pergunta", frente);
         aplicarMidiasExtraidasNoCard(card, "Resposta", verso);
         card._midiaNaoSuportada = frente.midiaNaoSuportada || verso.midiaNaoSuportada;
+        card._versoVazio = versoVazio;
         return card;
     });
 }
