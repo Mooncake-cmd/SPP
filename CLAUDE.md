@@ -21,6 +21,42 @@ específica.
 Ver `script.js`, seção "IMPORTAÇÃO DE BARALHOS DO ANKI (.apkg)", principalmente
 `converterNotaAnki`, `prepararTemplateAnki`, `renderizarTemplateAnki` e `converterNotaComTemplateAnki`.
 
+## Atenção recorrente: decks com HTML/CSS rico embutido no campo (não só no template)
+
+Vários decks reais (principalmente os gerados por IA/editores visuais de flashcard — ex. o deck FGV
+de "Preposição, Conjunção e Conectivos") não usam o mecanismo de template do Anki pra estilizar nada:
+o modelo é um "Básico" simples, e cada CAMPO da nota já vem com uma página HTML inteira embutida
+(`<div style="...">` aninhados, às vezes até `<style>` com `@media`/`@import`). Todo esse HTML passa
+por `sanitizarNoAnki`/`sanitizarEstiloInlineAnki` (`TAGS_ANKI_PERMITIDAS`/
+`PROPRIEDADES_CSS_ANKI_PERMITIDAS`, script.js), que só deixa passar uma allowlist restrita de
+tags/propriedades CSS por segurança — e qualquer propriedade fora dela é **descartada em silêncio**,
+sem erro nem aviso nenhum.
+
+Isso já causou pelo menos um bug real e feio: o deck usava `background:#0F7A52` (abreviado) num
+`<div>` pai e `color:#FFFFFF` no texto dentro dele — só `background-color` estava na allowlist, não
+`background`, então o fundo verde sumia e sobrava texto BRANCO INVISÍVEL sobre o fundo branco do
+site (não "sem a cor certa" — o texto literalmente desaparecia). Uma "tabela" montada com
+`<div style="display:grid; grid-template-columns:...">` (em vez de `<table>` de verdade) teve o
+mesmo problema: sem `display`/`grid-template-columns` na allowlist, as "linhas" viravam blocos
+empilhados sem nenhuma coluna.
+
+**Ao investigar um novo deck, além de checar template/campos/mídia (seção acima), vale também abrir
+o HTML bruto de uma nota (`sqlite3`/`python3` no `collection.anki21`, campo `flds`) e:**
+- Ver se tem `style="..."` inline usando propriedades que talvez não estejam em
+  `PROPRIEDADES_CSS_ANKI_PERMITIDAS` — sobretudo formas abreviadas (`background` em vez de
+  `background-color`, `border` já coberto, mas cuidado com `font`, `flex`, etc.) e propriedades de
+  layout (`display`, `grid-*`, `flex-*`, `gap`).
+- Prestar atenção em pares cor-de-texto-clara + fundo-escuro (ou o contrário) no HTML original —
+  se a propriedade de fundo não sobreviver à sanitização e a de texto sobreviver, o resultado é
+  texto ilegível/invisível, não só "menos bonito". É o tipo de bug que passa despercebido num teste
+  automatizado que só confere se o TEXTO está presente no DOM (ele está — só que invisível), então
+  vale conferir visualmente (screenshot) ou o `background-color`/`color` computados do elemento,
+  não só a presença do texto.
+- Se achar uma propriedade CSS legítima de fora da allowlist sendo descartada, é provável que valha
+  adicionar à lista (o filtro de `url()`/`expression()`/`javascript:`/`@import` em
+  `sanitizarEstiloInlineAnki` já se aplica a QUALQUER propriedade, então normalmente é seguro
+  expandir a lista com propriedades puramente visuais/de layout).
+
 # Futuro: substituir o SM-2 atual do SRS por FSRS
 
 O agendamento de revisão hoje (`processarRevisaoSRS`, script.js) é um SM-2 simplificado

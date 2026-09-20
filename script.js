@@ -2577,7 +2577,18 @@ const PROPRIEDADES_CSS_ANKI_PERMITIDAS = new Set([
     // NOVO: fonte/tamanho do CSS do MODELO Anki (ver extrairEstilosDeClassesAnki) — ex. o rótulo
     // "CAPITAL" do deck Ultimate Geography é menor/cinza/maiúsculo só por causa de ".type{font-size:
     // 70%; text-transform:uppercase}" no modelo.css, nunca por style inline num campo.
-    "font-size", "font-family", "text-transform", "letter-spacing", "line-height", "font-variant"
+    "font-size", "font-family", "text-transform", "letter-spacing", "line-height", "font-variant",
+    // NOVO: "background" (abreviado) — comum em decks gerados por IA/editor visual, que usam
+    // "background:#COR" ou "background:linear-gradient(...)" em vez de "background-color". Sem isso,
+    // um texto branco sobre um cabeçalho colorido assim (ex: "background:#0F7A52" no card, "color:
+    // #FFFFFF" no texto) ficava com a cor do texto preservada mas o fundo descartado — texto branco
+    // invisível sobre o fundo branco do site, não só "sem a cor certa". O filtro de url()/expression()/
+    // javascript:/@import logo abaixo se aplica a QUALQUER propriedade, então continua seguro contra
+    // imagem/código embutido no valor. "display"/"grid-*"/flex — mesmos decks costumam montar
+    // pseudo-tabelas com <div style="display:grid; grid-template-columns:..."> em vez de <table> de
+    // verdade (já permitido); sem essas propriedades, as "linhas" viravam blocos empilhados sem
+    // nenhuma coluna, perdendo a estrutura de tabela inteira.
+    "background", "display", "grid-template-columns", "grid-column", "gap", "align-items", "justify-content"
 ]);
 
 // Faixas de sanidade pra font-size (evita que um .apkg hostil estoure o layout do card com um valor
