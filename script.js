@@ -2222,7 +2222,7 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
         const nomeCampoCloze = encontrarNomeCampoClozeAnki(modelo);
         const nomesCampos = (modelo.flds || []).map(f => f.name);
         const idx = nomeCampoCloze ? nomesCampos.indexOf(nomeCampoCloze) : -1;
-        return converterNotaClozeAnki(modelo, flds, idx !== -1 ? idx : 0, tema, zip, nomeParaIndice).then(card => [card]);
+        return converterNotaClozeAnki(modelo, flds, idx !== -1 ? idx : 0, tema, zip, nomeParaIndice);
     }
 
     // NOVO: um tipo de nota pode ter MAIS DE UM TEMPLATE (ord 0, 1, 2...) — no Anki de verdade, cada
@@ -3063,45 +3063,62 @@ function converterNotaClozeAnki(modelo, flds, idxCampoCloze, tema, zip, nomePara
         const semNada = !processado.texto.trim() && processado.imagens.length === 0 && processado.midias.length === 0;
         if (semNada) throw new Error(`Nota cloze sem nenhum conteúdo. Campo original: "${campoTexto.slice(0, 60)}"`);
         const segmentos = parsearClozeAnki(processado.texto);
-        if (!segmentos.some(s => s.lacuna)) throw new Error(`Nota cloze sem nenhuma lacuna válida (esperava {{c1::...}}). Campo: "${campoTexto.slice(0, 60)}"`);
-        const resposta = segmentos.filter(s => s.lacuna).map(s => s.texto.trim()).filter(Boolean).join(", ");
+        // NOVO: uma nota cloze pode ter mais de um NÚMERO de lacuna distinto no mesmo campo (ex:
+        // "카페{{c1::에}} 가요. 카페{{c2::에서}} 공부해요."). No Anki de verdade isso gera 1 CARD POR
+        // NÚMERO — o card do c1 esconde só "에" (mostrando "에서" revelado normalmente), o card do c2 faz
+        // o oposto. Antes, todo {{cN::...}} virava lacuna dentro de UM card só, escondendo os dois ao
+        // mesmo tempo e nunca gerando o 2º card — uma tela que o Anki nunca mostraria, e menos cards
+        // importados do que o deck realmente tem.
+        const numeros = [...new Set(segmentos.filter(s => s.lacuna).map(s => s.numero))].sort((a, b) => Number(a) - Number(b));
+        if (numeros.length === 0) throw new Error(`Nota cloze sem nenhuma lacuna válida (esperava {{c1::...}}). Campo: "${campoTexto.slice(0, 60)}"`);
         const subtemaExibicao = segmentos.map(s => s.texto).join("");
-        const card = {
-            id: Date.now() + Math.floor(Math.random() * 1000000),
-            tema: tema, subtema: subtemaExibicao, resposta: resposta, tipo: "cloze", clozePartes: segmentos,
-            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
-        };
-        aplicarMidiasExtraidasNoCard(card, "Pergunta", processado);
-        card._midiaNaoSuportada = processado.midiaNaoSuportada;
 
         // NOVO: até aqui só o campo com {{c1::...}} é lido — os campos irmãos (ex: Embasamento, ✚ Dica,
         // ✚ Saiba mais) eram inteiramente ignorados antes, mesmo quando o template do card cloze os
         // exibia na resposta. Se o afmt do modelo for legível, descobrimos quais campos (fora o de
         // cloze) aparecem nele e em que ordem, extraindo cada um como HTML rico (mesma função do
-        // pipeline "com template" — ver converterNotaComTemplateAnki) pra exibir na revisão.
+        // pipeline "com template" — ver converterNotaComTemplateAnki) pra exibir na revisão. Extraído 1x
+        // só (não depende do número da lacuna) e reaproveitado em todos os cards gerados pra essa nota.
         const nomesCampos = (modelo.flds || []).map(f => f.name);
         const prep = prepararTemplateAnki(modelo);
+        let promessaCamposVerso = Promise.resolve(null);
         if (prep && prep.afmt) {
             const nomeCampoCloze = nomesCampos[idxCampoCloze];
             const ordemVerso = ordemDosCamposNoTemplate(prep.afmt, nomesCampos).filter(c => c.nome !== nomeCampoCloze);
             if (ordemVerso.length > 0) {
-                return Promise.all(ordemVerso.map(c => {
+                promessaCamposVerso = Promise.all(ordemVerso.map(c => {
                     const i = nomesCampos.indexOf(c.nome);
                     return extrairCampoAnkiComoHtml(flds[i] || "", zip, nomeParaIndice).then(r => ({ ...c, r }));
                 })).then(resultados => {
                     const camposVerso = resultados.filter(x => x.r.temConteudo).map(x => ({ nome: x.nome, html: x.r.html, hint: x.hint }));
-                    if (camposVerso.length > 0) card.camposVerso = camposVerso;
                     // NOVO: esses campos irmãos só passam pelo pipeline novo (extrairCampoAnkiComoHtml,
                     // sem equivalente antigo pra comparar) — diferente do caso de converterNotaComTemplateAnki,
                     // aqui não existe um 2º pipeline "sucesso" pra checar antes de avisar, então qualquer
                     // falha real dele (ex: mídia referenciada que não existe no zip nem é URL http/https)
                     // já é motivo suficiente pra somar ao aviso, senão a falha fica muda pro usuário.
-                    if (resultados.some(x => x.r.midiaNaoSuportada)) card._midiaNaoSuportada = true;
-                    return card;
+                    return { camposVerso: camposVerso.length > 0 ? camposVerso : null, midiaNaoSuportada: resultados.some(x => x.r.midiaNaoSuportada) };
                 });
             }
         }
-        return card;
+
+        return promessaCamposVerso.then(versoExtra => numeros.map((numero, ordem) => {
+            // Pra ESTE card (número "numero"): só a(s) lacuna(s) desse número ficam escondidas — as de
+            // outro número (ex: c2 quando este card é o do c1) aparecem reveladas normalmente, exatamente
+            // como o Anki mostra.
+            const clozePartesCard = segmentos.map(s =>
+                s.lacuna && s.numero !== numero ? { texto: s.texto, lacuna: false } : { texto: s.texto, lacuna: s.lacuna }
+            );
+            const resposta = segmentos.filter(s => s.lacuna && s.numero === numero).map(s => s.texto.trim()).filter(Boolean).join(", ");
+            const card = {
+                id: Date.now() + Math.floor(Math.random() * 1000000) + ordem,
+                tema: tema, subtema: subtemaExibicao, resposta: resposta, tipo: "cloze", clozePartes: clozePartesCard,
+                data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
+            };
+            aplicarMidiasExtraidasNoCard(card, "Pergunta", processado);
+            card._midiaNaoSuportada = processado.midiaNaoSuportada || !!(versoExtra && versoExtra.midiaNaoSuportada);
+            if (versoExtra && versoExtra.camposVerso) card.camposVerso = versoExtra.camposVerso;
+            return card;
+        }));
     });
 }
 
@@ -3111,11 +3128,14 @@ function parsearClozeAnki(texto) {
     // tem uma quebra de linha no meio (ex: "{{c1::cento<br>e vinte}}", já virou "\n" antes de chegar
     // aqui — ver converterHtmlParaTextoPlano) nunca era encontrada pelo regex, e o card era rejeitado
     // inteiro como "sem nenhuma lacuna válida", mesmo tendo uma de verdade.
-    const regex = /\{\{c\d+::(.*?)(?:::.*?)?\}\}/gs;
+    // NOVO: captura também o número "N" de "{{cN::...}}" (ver converterNotaClozeAnki) — necessário pra
+    // gerar 1 card por número distinto de lacuna, igual o Anki faz, em vez de tratar {{c1::}}/{{c2::}}
+    // como a mesma lacuna de um único card.
+    const regex = /\{\{c(\d+)::(.*?)(?:::.*?)?\}\}/gs;
     let ultimoIndice = 0, match;
     while ((match = regex.exec(texto)) !== null) {
         if (match.index > ultimoIndice) segmentos.push({ texto: texto.slice(ultimoIndice, match.index), lacuna: false });
-        segmentos.push({ texto: match[1], lacuna: true });
+        segmentos.push({ texto: match[2], lacuna: true, numero: match[1] });
         ultimoIndice = regex.lastIndex;
     }
     if (ultimoIndice < texto.length) segmentos.push({ texto: texto.slice(ultimoIndice), lacuna: false });
