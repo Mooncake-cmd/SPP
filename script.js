@@ -3488,6 +3488,14 @@ function processarRevisaoSRS(qualidade) {
     cardAtualRevisao.intervalo_atual = novoIntervalo;
     cardAtualRevisao.data_proxima_revisao = calcularDataProximaRevisaoSRS(novoIntervalo);
     dados.pontosAcumulados += 10;
+    // NOVO/CORREÇÃO: faltava marcar srsItemsAlterado aqui — sem isso, salvarDados() (logo abaixo)
+    // nunca gravava dados.srsItems no IndexedDB depois de uma revisão (só o resto de "dados", que vai
+    // pro localStorage, ficava salvo). O card respondido sumia da fila na hora, mas com um reload da
+    // página o array de cards era recarregado do IndexedDB com o estado ANTIGO (intervalo/data de
+    // antes da revisão) — a revisão "sumia" e o card voltava a aparecer como se nunca tivesse sido
+    // respondido. Bug pré-existente (de antes desta sessão), achado por um usuário que recarregou a
+    // página logo depois de revisar um card.
+    srsItemsAlterado = true;
 
     // NOVO: registra cada revisão (não só o estado atual do card, que a linha acima já sobrescreve) —
     // é a base de dados necessária pra, no futuro, calibrar um algoritmo de agendamento mais sofisticado
