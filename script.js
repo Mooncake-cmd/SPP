@@ -3,32 +3,51 @@
 /* ===         (COM WEB WORKER FIX)              === */
 /* ================================================= */
 
+function criarDadosPadrao() {
+    return {
+        itens: [],
+        recompensas: [],
+        historicoEstudos: [],
+        materias: [],
+        objetivos: [],
+        historicoConquistas: [],
+        chefoes: [],
+        srsItems: [],
+        srsRevisoesLog: [],
+        srsLimiteNovosPorDia: 20,
+        biblioteca: [],
+        historicoDiario: [],
+        streakAtual: 0,
+        streakRecorde: 0,
+        configTimer: { som: 'sino', notificacao: false, mostrarPrevisao: true },
+        tema: 'claro',
+        progressoGlobal: {},
+        metasGlobais: { mes: 50, ano: 500 },
+        ultimaData: "",
+        pontosAcumulados: 0,
+        hp: 300,
+        maxHp: 300,
+        maestriaAcumulada: {}
+    };
+}
+
 var dadosBrutos = localStorage.getItem("dados");
-var dados = dadosBrutos ? JSON.parse(dadosBrutos) : { 
-    itens: [], 
-    recompensas: [], 
-    historicoEstudos: [], 
-    materias: [], 
-    objetivos: [], 
-    historicoConquistas: [],
-    chefoes: [],
-    srsItems: [],
-    srsRevisoesLog: [],
-    srsLimiteNovosPorDia: 20,
-    biblioteca: [],
-    historicoDiario: [],
-    streakAtual: 0,
-    streakRecorde: 0,
-    configTimer: { som: 'sino', notificacao: false, mostrarPrevisao: true },
-    tema: 'claro',
-    progressoGlobal: {}, 
-    metasGlobais: { mes: 50, ano: 500 },
-    ultimaData: "", 
-    pontosAcumulados: 0,
-    hp: 300,      
-    maxHp: 300,   
-    maestriaAcumulada: {} 
-};
+var dados;
+// NOVO: sem isso, um "dados" corrompido no localStorage (gravação cortada por fechamento abrupto do
+// navegador, corrupção externa etc.) lançava uma exceção não capturada NA PRIMEIRA LINHA do script —
+// a página inteira quebrava, sem nem o resto do app (incluindo "Resetar Tudo") chegar a existir. Agora
+// cai num perfil em branco, guarda o conteúdo bruto original numa chave separada (pra alguém técnico
+// tentar recuperar depois, se der) e avisa — em vez de travar tudo em silêncio.
+try {
+    dados = dadosBrutos ? JSON.parse(dadosBrutos) : criarDadosPadrao();
+} catch (err) {
+    console.error("Não foi possível interpretar os dados salvos no localStorage (JSON corrompido):", err);
+    if (dadosBrutos) {
+        try { localStorage.setItem("dados_backup_corrompido_" + Date.now(), dadosBrutos); } catch (e2) { /* localStorage cheio — nada a fazer, segue com o perfil em branco mesmo assim */ }
+    }
+    dados = criarDadosPadrao();
+    alert("Não foi possível carregar seus dados salvos (o arquivo ficou corrompido). Um perfil em branco foi criado. Uma cópia do conteúdo antigo ficou guardada no armazenamento do navegador, caso queira tentar recuperar manualmente. Se você tiver um backup exportado, restaure-o em \"Gerenciar Dados\".");
+}
 
 // --- GARANTIA DE INTEGRIDADE DOS DADOS ---
 if (!dados.recompensas) dados.recompensas = [];
@@ -3897,10 +3916,16 @@ const BIBLIOTECA_DB_NAME = "bibliotecaPDF";
 const BIBLIOTECA_DB_VERSION = 1;
 const BIBLIOTECA_STORE_NAME = "arquivos";
 let dbBibliotecaInstance = null;
+let dbBibliotecaPromise = null;
 
+// NOVO: cacheava só a INSTÂNCIA resolvida (dbBibliotecaInstance), não a promise em andamento — várias
+// chamadas concorrentes ANTES da 1ª conexão terminar (ex: vários arquivos de livro carregados ao mesmo
+// tempo) viam dbBibliotecaInstance ainda nulo e cada uma abria sua PRÓPRIA conexão com indexedDB.open(),
+// deixando as conexões extras órfãs (nunca fechadas) por trás da que acabou vencendo a corrida. Cachear
+// a promise em si faz qualquer chamada concorrente reaproveitar a MESMA conexão sendo aberta.
 function abrirDBBiblioteca() {
-    return new Promise((resolve, reject) => {
-        if (dbBibliotecaInstance) { resolve(dbBibliotecaInstance); return; }
+    if (dbBibliotecaPromise) return dbBibliotecaPromise;
+    dbBibliotecaPromise = new Promise((resolve, reject) => {
         const request = indexedDB.open(BIBLIOTECA_DB_NAME, BIBLIOTECA_DB_VERSION);
         request.onupgradeneeded = function(e) {
             const db = e.target.result;
@@ -3909,8 +3934,9 @@ function abrirDBBiblioteca() {
             }
         };
         request.onsuccess = function(e) { dbBibliotecaInstance = e.target.result; resolve(dbBibliotecaInstance); };
-        request.onerror = function(e) { reject(e); };
+        request.onerror = function(e) { dbBibliotecaPromise = null; reject(e); }; // permite tentar de novo numa próxima chamada
     });
+    return dbBibliotecaPromise;
 }
 function salvarArquivoLivro(id, arrayBuffer) {
     return abrirDBBiblioteca().then(db => new Promise((resolve, reject) => {
@@ -3942,10 +3968,15 @@ const IMAGENS_SRS_DB_NAME = "imagensSRS";
 const IMAGENS_SRS_DB_VERSION = 1;
 const IMAGENS_SRS_STORE_NAME = "imagens";
 let dbImagensSRSInstance = null;
+let dbImagensSRSPromise = null;
 
+// NOVO: ver comentário equivalente em abrirDBBiblioteca — cacheia a PROMISE em andamento, não só a
+// instância já resolvida, pra chamadas concorrentes (ex: existeImagemLocalSRS rodando em paralelo
+// irrestrito sobre milhares de IDs, ver processarMidiasSRSEmLotesComChecagemPrevia) reaproveitarem a
+// MESMA conexão em vez de cada uma abrir a sua e deixar o resto órfão.
 function abrirDBImagensSRS() {
-    return new Promise((resolve, reject) => {
-        if (dbImagensSRSInstance) { resolve(dbImagensSRSInstance); return; }
+    if (dbImagensSRSPromise) return dbImagensSRSPromise;
+    dbImagensSRSPromise = new Promise((resolve, reject) => {
         const request = indexedDB.open(IMAGENS_SRS_DB_NAME, IMAGENS_SRS_DB_VERSION);
         request.onupgradeneeded = function(e) {
             const db = e.target.result;
@@ -3954,8 +3985,9 @@ function abrirDBImagensSRS() {
             }
         };
         request.onsuccess = function(e) { dbImagensSRSInstance = e.target.result; resolve(dbImagensSRSInstance); };
-        request.onerror = function(e) { reject(e); };
+        request.onerror = function(e) { dbImagensSRSPromise = null; reject(e); };
     });
+    return dbImagensSRSPromise;
 }
 function salvarImagemSRS(id, blob) {
     return abrirDBImagensSRS().then(db => new Promise((resolve, reject) => {
@@ -4009,10 +4041,12 @@ const SRS_CARDS_DB_VERSION = 1;
 const SRS_CARDS_STORE_NAME = "cards";
 const SRS_CARDS_CHAVE = "todos";
 let dbSrsCardsInstance = null;
+let dbSrsCardsPromise = null;
 
+// NOVO: ver comentário equivalente em abrirDBBiblioteca/abrirDBImagensSRS.
 function abrirDBSrsCards() {
-    return new Promise((resolve, reject) => {
-        if (dbSrsCardsInstance) { resolve(dbSrsCardsInstance); return; }
+    if (dbSrsCardsPromise) return dbSrsCardsPromise;
+    dbSrsCardsPromise = new Promise((resolve, reject) => {
         const request = indexedDB.open(SRS_CARDS_DB_NAME, SRS_CARDS_DB_VERSION);
         request.onupgradeneeded = function(e) {
             const db = e.target.result;
@@ -4021,8 +4055,9 @@ function abrirDBSrsCards() {
             }
         };
         request.onsuccess = function(e) { dbSrsCardsInstance = e.target.result; resolve(dbSrsCardsInstance); };
-        request.onerror = function(e) { reject(e); };
+        request.onerror = function(e) { dbSrsCardsPromise = null; reject(e); };
     });
+    return dbSrsCardsPromise;
 }
 function salvarSrsItemsIndexedDB(itens) {
     return abrirDBSrsCards().then(db => new Promise((resolve, reject) => {
@@ -5472,7 +5507,7 @@ function atualizar() {
     if (areaHistorico) {
         areaHistorico.innerHTML = "";
         if (dados.historicoEstudos.length === 0) areaHistorico.innerHTML = "<tr><td colspan='3' style='color:var(--text-secondary);'>Vazio</td></tr>";
-        else dados.historicoEstudos.forEach(s => areaHistorico.innerHTML += `<tr><td>${s.data}</td><td>${s.materia || 'Geral'}</td><td>${s.duracao}</td></tr>`);
+        else dados.historicoEstudos.forEach(s => areaHistorico.innerHTML += `<tr><td>${s.data}</td><td>${escaparHtml(s.materia || 'Geral')}</td><td>${s.duracao}</td></tr>`);
     }
     const areaMaterias = document.getElementById("corpo-materias");
     const sugestoes = document.getElementById("sugestoes-materias");
@@ -6690,13 +6725,41 @@ function aguardarGoogleCarregado(callback, tentativas) {
     setTimeout(() => aguardarGoogleCarregado(callback, tentativas + 1), 500);
 }
 
-function chamarApiDrive(url, opcoes) {
+// NOVO: o token de acesso do Google expira (~1h) — sem isso, depois de uma aba ficar aberta tempo
+// suficiente, TODA chamada à API do Drive passava a responder 401, sincronizarComDrive() só logava o
+// erro no console e a sincronização parava de funcionar em silêncio, com a UI continuando a mostrar
+// "✅ Conectado" (driveConectado nunca virava false nesse caminho) — só um recarregamento manual da
+// página resolvia. Dispara uma renovação silenciosa (reaproveita o token client já inicializado, mesmo
+// fluxo de tentarReconectarDriveAoCarregar) e espera até ela terminar (o callback permanente registrado
+// em inicializarGoogleTokenClient troca googleAccessToken sozinho) ou um prazo curto passar — não trava
+// o app se o Google não responder. Não mexe em googleTokenClient.callback diretamente (ver
+// aguardarChecagemInicialDoDrive, mesmo motivo: não é garantido que a lib respeite reatribuir isso).
+function renovarTokenDriveEEsperar() {
+    return new Promise(resolve => {
+        const tokenAntes = googleAccessToken;
+        conectarGoogleDrive(true);
+        const prazoFinal = Date.now() + 8000;
+        (function checar() {
+            if (googleAccessToken !== tokenAntes || Date.now() >= prazoFinal) { resolve(); return; }
+            setTimeout(checar, 150);
+        })();
+    });
+}
+
+function chamarApiDrive(url, opcoes, jaTentouRenovarToken) {
     // NOVO: cache "no-store" — sem isso, o navegador podia devolver uma resposta antiga guardada em
     // cache pra essa mesma URL (ex: o GET do arquivo de sincronização) em vez de buscar o conteúdo
     // realmente atual no Drive, fazendo o app achar que não tinha nada novo quando na verdade tinha.
     return fetch(url, Object.assign({ cache: "no-store" }, opcoes, {
         headers: Object.assign({ Authorization: `Bearer ${googleAccessToken}` }, (opcoes && opcoes.headers) || {})
     })).then(r => {
+        // NOVO: token expirado — tenta renovar 1x (silenciosamente) e refaz a MESMA chamada antes de
+        // desistir. Se a renovação falhar de verdade (revogado, sem sessão), onFalhaConexaoDrive (disparado
+        // pelo próprio callback do token client) já marca driveConectado = false e atualiza a UI — a 2ª
+        // tentativa aqui vai bater 401 de novo e o erro sobe normalmente pro .catch() de quem chamou.
+        if (r.status === 401 && !jaTentouRenovarToken) {
+            return renovarTokenDriveEEsperar().then(() => chamarApiDrive(url, opcoes, true));
+        }
         if (!r.ok) throw new Error(`Drive API respondeu ${r.status}`);
         return r.status === 204 ? null : r.json();
     });
@@ -6855,10 +6918,14 @@ const GOOGLE_DRIVE_PASTA_MIDIA_NOME = "spp_midia_cards";
 let driveIdPastaMidiaCache = null;
 
 // Variante de chamarApiDrive pra quando a RESPOSTA é o conteúdo binário em si (?alt=media), não JSON.
-function chamarApiDriveBlob(url, opcoes) {
+function chamarApiDriveBlob(url, opcoes, jaTentouRenovarToken) {
     return fetch(url, Object.assign({ cache: "no-store" }, opcoes, {
         headers: Object.assign({ Authorization: `Bearer ${googleAccessToken}` }, (opcoes && opcoes.headers) || {})
     })).then(r => {
+        // NOVO: mesmo tratamento de token expirado que chamarApiDrive — ver renovarTokenDriveEEsperar.
+        if (r.status === 401 && !jaTentouRenovarToken) {
+            return renovarTokenDriveEEsperar().then(() => chamarApiDriveBlob(url, opcoes, true));
+        }
         if (!r.ok) throw new Error(`Drive API respondeu ${r.status}`);
         return r.blob();
     });
