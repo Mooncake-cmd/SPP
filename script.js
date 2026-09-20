@@ -1816,6 +1816,9 @@ function importarApkg(event) {
                 if (resumo.versoVazio) {
                     msg += `\n📭 ${resumo.versoVazio} card(s) importado(s) com o verso (resposta) vazio — igual acontece no Anki de verdade quando só a frente tem conteúdo (ex: campo de tradução ainda não preenchido, ou card "divisor" sem resposta por design do deck)`;
                 }
+                if (resumo.duplicadosPulados) {
+                    msg += `\n🔁 ${resumo.duplicadosPulados} card(s) pulado(s) por já existir (mesmo tema, pergunta e resposta de um card já importado antes)`;
+                }
                 if (resumo.exemplosFalha.length > 0) {
                     msg += `\n\nExemplos de erro (copie esse texto e cole na conversa se quiser que eu investigue):\n- ${resumo.exemplosFalha.join("\n- ")}`;
                 }
@@ -2093,6 +2096,16 @@ function adicionarAvisoFidelidadeApkg(resumo, mensagem) {
     if (!resumo.avisosFidelidade.includes(mensagem)) resumo.avisosFidelidade.push(mensagem);
 }
 
+// Chave de identidade de um card pra detectar duplicata na importação de .apkg (ver processarBancoAnki)
+// — mesmo critério de "já existe" já usado na adição manual (tema+pergunta, linha ~1242), com a
+// resposta somada: pergunta sozinha não basta aqui porque uma nota cloze com 2+ números de lacuna (ver
+// converterNotaClozeAnki) gera 2 cards com a MESMA pergunta renderizada (o texto completo, com as 2
+// lacunas visíveis) e respostas DIFERENTES — comparar só a pergunta faria o 2º card parecer duplicata
+// do 1º e ser descartado por engano.
+function assinaturaCardSRS(tema, subtema, resposta) {
+    return `${(tema || "").trim().toLowerCase()}\u0000${(subtema || "").trim().toLowerCase()}\u0000${(resposta || "").trim().toLowerCase()}`;
+}
+
 function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     const colRows = db.exec("SELECT decks, models FROM col LIMIT 1");
     if (!colRows.length) throw new Error("Banco do Anki sem a tabela 'col' esperada.");
@@ -2122,6 +2135,16 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     const totalNotas = notas.length;
     let processadas = 0;
     atualizarProgressoOperacao(0, totalNotas, "📥", "Importando baralho...");
+
+    // NOVO: reimportar um .apkg já importado antes (ex: pra pegar uma correção de fidelidade nova, sem
+    // ter que apagar o deck e perder o histórico de revisão) duplicava TODO card que já tinha entrado
+    // certo — a importação nunca checava se o card já existia, só fazia push de tudo de novo. Calculado
+    // 1x aqui (fora do loop de notas) com todos os cards já presentes no momento em que a importação
+    // começou; cada card novo aceito também entra nesse mesmo Set, pra um card gerado por uma nota não
+    // ser visto como duplicata de outro card da MESMA importação (ex: 2 templates da mesma nota nunca
+    // têm tema+pergunta+resposta iguais, então isso não afeta o caso normal — só evita reprocessar o
+    // Set inteiro de novo a cada nota).
+    const assinaturasJaImportadas = new Set(dados.srsItems.map(it => assinaturaCardSRS(it.tema, it.subtema, it.resposta)));
 
     // NOVO: alguns recursos do Anki não têm suporte nenhum aqui — não quebram a importação (o card
     // ainda entra, com o resto do conteúdo), mas o resultado final na tela pode ficar visivelmente
@@ -2172,10 +2195,21 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
                 // NOVO: uma nota com múltiplos templates (ver prepararTemplatesAnki) vira múltiplos
                 // cards aqui — cada um conta pro "sucesso" normalmente, como se fossem notas separadas.
                 cards.forEach(card => {
-                    if (card._midiaNaoSuportada) resumo.midiaNaoSuportada++;
+                    const midiaNaoSuportadaCard = !!card._midiaNaoSuportada;
+                    const versoVazioCard = !!card._versoVazio;
                     delete card._midiaNaoSuportada;
-                    if (card._versoVazio) resumo.versoVazio = (resumo.versoVazio || 0) + 1;
                     delete card._versoVazio;
+                    // NOVO: reimportar um .apkg já importado antes (pra pegar uma correção nova) não deve
+                    // duplicar os cards que já tinham entrado certo — ver assinaturaCardSRS/
+                    // assinaturasJaImportadas acima.
+                    const assinatura = assinaturaCardSRS(card.tema, card.subtema, card.resposta);
+                    if (assinaturasJaImportadas.has(assinatura)) {
+                        resumo.duplicadosPulados = (resumo.duplicadosPulados || 0) + 1;
+                        return;
+                    }
+                    assinaturasJaImportadas.add(assinatura);
+                    if (midiaNaoSuportadaCard) resumo.midiaNaoSuportada++;
+                    if (versoVazioCard) resumo.versoVazio = (resumo.versoVazio || 0) + 1;
                     dados.srsItems.push(card);
                     resumo.sucesso++;
                 });
