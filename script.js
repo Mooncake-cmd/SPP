@@ -1253,14 +1253,23 @@ function adicionarCardSRS() {
         const temLacunas = estadoClozeSRS.ativo && estadoClozeSRS.segmentos.some(s => s.lacuna);
         item.tema = tema;
         item.subtema = subtema;
+        // Ver comentário em limparCampoRicoAnkiAoEditar — mesmo motivo da edição inline na lista.
+        // frenteTemplateHtml/camposFrente nunca são usados por card cloze (a pergunta vem sempre de
+        // clozePartes), então limpar aqui sempre é seguro nos dois ramos abaixo.
+        limparCampoRicoAnkiAoEditar(item, 'frente');
         if (temLacunas) {
             item.tipo = "cloze";
             item.clozePartes = estadoClozeSRS.segmentos.map(s => ({ texto: s.texto, lacuna: s.lacuna }));
             item.resposta = estadoClozeSRS.segmentos.filter(s => s.lacuna).map(s => s.texto.trim()).filter(Boolean).join(", ");
+            // NOVO: só limpa versoTemplateHtml (versão rica de card NORMAL, deixaria de fazer sentido
+            // depois de virar cloze) — mantém camposVerso de propósito, é o mecanismo de Embasamento/
+            // Saiba mais de cards cloze importados do Anki (ver converterNotaClozeAnki), não editado aqui.
+            delete item.versoTemplateHtml;
         } else {
             item.tipo = "normal";
             delete item.clozePartes;
             item.resposta = resposta;
+            limparCampoRicoAnkiAoEditar(item, 'resposta');
         }
 
         aplicarImagensPendentesNoCard(item, "srs").then(() => {
@@ -3938,13 +3947,36 @@ function removerCardSRS(id) {
     });
 }
 
+// NOVO: cards importados do Anki (pipeline com template, ver converterNotaComTemplateAnki) guardam
+// DUAS versões de cada lado — o texto puro (subtema/resposta, mantido "por compatibilidade": busca,
+// exportação, ESTA lista) e um HTML rico (frenteTemplateHtml/camposFrente pra pergunta,
+// versoTemplateHtml/camposVerso pra resposta) que reproduz o template original e TEM PRIORIDADE na
+// tela de revisão de verdade (ver renderizarCardNaAreaRevisao: primeiro tenta *TemplateHtml, depois
+// camposFrente/camposVerso, só cai no texto puro se nenhum dos dois existir). Editar só o texto puro
+// sem limpar a versão rica fazia a correção aparecer em todo canto que lê subtema/resposta direto
+// (esta lista, busca, backup) MENOS na revisão — exatamente onde a pessoa via o conteúdo de verdade,
+// então a correção "sumia" ao rever o card. A mídia desse lado não se perde ao limpar a versão rica:
+// ela também é espelhada nos campos antigos (imagemRespostaId/midiaRespostaId etc, ver
+// aplicarMidiasExtraidasNoCard), que exibirImagensRevisaoAtual volta a usar assim que o HTML rico
+// correspondente some.
+function limparCampoRicoAnkiAoEditar(item, lado) {
+    if (lado === 'frente') { delete item.frenteTemplateHtml; delete item.camposFrente; }
+    else if (lado === 'resposta') { delete item.versoTemplateHtml; delete item.camposVerso; }
+}
+
 function editarCampoSRS(id, campo, valor) {
     const item = dados.srsItems.find(i => i.id === id);
     if (!item) return;
     const valorLimpo = (valor || "").trim();
-    if (campo === 'resposta' && (valorLimpo === '' || valorLimpo === '(sem resposta — clique para adicionar)')) { item.resposta = ""; srsItemsAlterado = true; salvar(); return; }
+    if (campo === 'resposta' && (valorLimpo === '' || valorLimpo === '(sem resposta — clique para adicionar)')) {
+        item.resposta = "";
+        limparCampoRicoAnkiAoEditar(item, 'resposta');
+        srsItemsAlterado = true; salvar(); return;
+    }
     if ((campo === 'tema' || campo === 'subtema') && valorLimpo === '') { salvar(); return; } // não permite ficar vazio
     item[campo] = valorLimpo;
+    if (campo === 'subtema') limparCampoRicoAnkiAoEditar(item, 'frente');
+    if (campo === 'resposta') limparCampoRicoAnkiAoEditar(item, 'resposta');
     srsItemsAlterado = true;
     salvar();
 }
