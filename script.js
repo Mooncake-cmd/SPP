@@ -6550,10 +6550,20 @@ function agendarSincronizacaoDrive() {
     syncDrivePendente = setTimeout(sincronizarComDrive, SYNC_DRIVE_DEBOUNCE_MS);
 }
 
+// NOVO: barra de progresso (mesma infraestrutura usada no import/export de backup) só aqui, no clique
+// manual — as sincronizações automáticas (debounce de 20s, polling periódico, ao voltar pra aba)
+// continuam silenciosas de propósito, pra não interromper o uso com um modal toda hora sem o usuário
+// ter pedido. sincronizarComDrive() já trata falha internamente (nunca rejeita a promise), então o
+// .finally() aqui sempre esconde o modal, sucesso ou erro.
 function sincronizarComDriveAgora() {
     if (!driveConectado) { alert("Conecte o Google Drive primeiro."); return; }
     clearTimeout(syncDrivePendente);
-    sincronizarComDrive();
+    mostrarProgressoOperacao("Sincronizando com o Drive...", "🔄");
+    atualizarProgressoOperacao(0, 1, "🔄", "Sincronizando...");
+    sincronizarComDrive().finally(() => {
+        atualizarProgressoOperacao(1, 1, "🔄", "Sincronizando...");
+        esconderProgressoOperacao();
+    });
 }
 
 // Nunca aplica/recarrega sozinho quando detecta uma versão remota mais nova — só mostra um aviso e
