@@ -2243,7 +2243,9 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
     // blobs pendentes ao mesmo tempo pode esgotar. Processar em lotes pequenos, com uma pausa real
     // (setTimeout) entre eles, limita quanto fica pendente ao mesmo tempo e devolve o controle pro
     // navegador repintar a cada lote — a barra passa a avançar de verdade, em vez de só no final.
-    const TAMANHO_LOTE_IMPORTACAO = 25;
+    // NOVO: mesmo nível de paralelismo configurável pelo usuário usado no backup/sincronização de mídia
+    // (ver FATORES_NIVEL_PARALELISMO_ARQUIVOS) — "conservador" mantém esse valor-base de sempre.
+    const TAMANHO_LOTE_IMPORTACAO = 25 * obterFatorParalelismoArquivos();
     function processarLote(inicio) {
         const lote = notas.slice(inicio, inicio + TAMANHO_LOTE_IMPORTACAO);
         if (lote.length === 0) return Promise.resolve();
@@ -3968,6 +3970,18 @@ function carregarImagemSRS(id) {
         const tx = db.transaction(IMAGENS_SRS_STORE_NAME, "readonly");
         const req = tx.objectStore(IMAGENS_SRS_STORE_NAME).get(id);
         req.onsuccess = () => resolve(req.result);
+        req.onerror = (e) => reject(e);
+    }));
+}
+// NOVO: getKey() (não get()) — confirma se a chave existe SEM materializar o blob inteiro em memória.
+// Usado pra separar "essa mídia existe localmente?" (barato, seguro rodar em paralelo irrestrito) do
+// carregamento de verdade (que só vale a pena pra quem realmente existe) — ver
+// processarMidiasSRSEmLotesComChecagemPrevia, seção de sincronização com o Drive.
+function existeImagemLocalSRS(id) {
+    return abrirDBImagensSRS().then(db => new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGENS_SRS_STORE_NAME, "readonly");
+        const req = tx.objectStore(IMAGENS_SRS_STORE_NAME).getKey(id);
+        req.onsuccess = () => resolve(req.result !== undefined);
         req.onerror = (e) => reject(e);
     }));
 }
@@ -6321,20 +6335,68 @@ function exportarComLivrosEmAndamento() {
     gerarBackupComLivros(dados.biblioteca.filter(l => !l.concluido));
 }
 
-// Processa uma lista de itens em lotes pequenos (em vez de todos de uma vez em paralelo) — evita ter
-// vários arquivos grandes (PDFs, imagens de card) na memória ao mesmo tempo, o que trava/congela a aba
-// em máquinas com pouca RAM. Compartilhado entre gerar (export) e restaurar (import) o backup com
-// livros — as duas direções leem/escrevem a mesma quantidade de arquivos potencialmente grandes.
-const TAMANHO_LOTE_ARQUIVOS_BACKUP = 3;
+// NOVO: nível de paralelismo ao processar vários arquivos de uma vez (mídia de card, PDF/EPUB da
+// biblioteca, nota de um .apkg) — controla o tamanho do lote usado por processarArquivosBackupEmLotes
+// E pelo importador de .apkg (ver TAMANHO_LOTE_IMPORTACAO em processarBancoAnki). Preferência POR
+// APARELHO (localStorage direto, nunca dentro de "dados" — não faz sentido sincronizar isso entre
+// aparelhos com capacidades diferentes, ex: celular mais potente que o notebook). "conservador" mantém
+// o comportamento de sempre (os valores-base de cada função já foram calibrados nesse nível); os
+// outros níveis multiplicam esse valor-base, preservando o equilíbrio relativo que cada função já tinha
+// entre si (ex: notas de Anki, mais leves, sempre tiveram um lote-base maior que arquivo de backup).
+const FATORES_NIVEL_PARALELISMO_ARQUIVOS = { conservador: 1, equilibrado: 3, agressivo: 8 };
+function obterFatorParalelismoArquivos() {
+    const nivel = localStorage.getItem("spp_nivel_paralelismo_arquivos") || "conservador";
+    return FATORES_NIVEL_PARALELISMO_ARQUIVOS[nivel] || 1;
+}
+function definirNivelParalelismoArquivos(nivel) {
+    if (!FATORES_NIVEL_PARALELISMO_ARQUIVOS[nivel]) return;
+    localStorage.setItem("spp_nivel_paralelismo_arquivos", nivel);
+}
+function inicializarSelectNivelParalelismoArquivos() {
+    const select = document.getElementById("select-nivel-paralelismo-arquivos");
+    if (!select) return; // UI ainda não existe nessa página/versão
+    select.value = localStorage.getItem("spp_nivel_paralelismo_arquivos") || "conservador";
+}
+
+// Processa uma lista de itens em lotes (em vez de todos de uma vez em paralelo) — evita ter vários
+// arquivos grandes (PDFs, imagens de card) na memória ao mesmo tempo, o que trava/congela a aba em
+// aparelhos com pouca RAM. Compartilhado entre gerar (export) e restaurar (import) o backup com
+// livros, e entre elas e a sincronização de mídia — todas leem/escrevem arquivos potencialmente
+// grandes. Tamanho do lote ajustável pelo usuário (ver FATORES_NIVEL_PARALELISMO_ARQUIVOS acima).
+const TAMANHO_LOTE_ARQUIVOS_BACKUP_BASE = 3;
 function processarArquivosBackupEmLotes(itens, processarItem) {
+    const tamanhoLote = TAMANHO_LOTE_ARQUIVOS_BACKUP_BASE * obterFatorParalelismoArquivos();
     let indice = 0;
     function proximoLote() {
         if (indice >= itens.length) return Promise.resolve();
-        const lote = itens.slice(indice, indice + TAMANHO_LOTE_ARQUIVOS_BACKUP);
-        indice += TAMANHO_LOTE_ARQUIVOS_BACKUP;
+        const lote = itens.slice(indice, indice + tamanhoLote);
+        indice += tamanhoLote;
         return Promise.all(lote.map(processarItem)).then(proximoLote);
     }
     return proximoLote();
+}
+
+// NOVO: separa a checagem "essa mídia existe localmente?" (existeImagemLocalSRS, via getKey — nunca
+// materializa o blob, seguro rodar em paralelo IRRESTRITO sobre a lista inteira) do processamento de
+// verdade (que só roda pra quem existe, ainda em lote via processarArquivosBackupEmLotes, protegendo a
+// memória contra vários blobs grandes ao mesmo tempo). Sem essa separação, um ID de mídia que nem
+// existe localmente ainda (comum num aparelho que baixa só sob demanda — ver
+// carregarImagemSRSComFallbackDrive) ficava preso no mesmo limite de lote dos casos que precisam de
+// trabalho de verdade, e a maioria das "rodadas" de espera não fazia nada útil. Usado tanto pela
+// sincronização de mídia quanto pela parte de imagens do backup com livros — as duas percorrem a MESMA
+// lista de IDs (todos os já referenciados pelos cards) e têm a mesma chance de a maioria não estar
+// baixada localmente ainda.
+function processarMidiasSRSEmLotesComChecagemPrevia(ids, marcarConcluido, processarExistente) {
+    return Promise.all(ids.map(id =>
+        existeImagemLocalSRS(id).then(existe => {
+            if (existe) return id;
+            marcarConcluido();
+            return null;
+        }).catch(() => { marcarConcluido(); return null; })
+    )).then(resultados => {
+        const existentes = resultados.filter(id => id !== null);
+        return processarArquivosBackupEmLotes(existentes, id => processarExistente(id).finally(marcarConcluido));
+    });
 }
 
 function gerarBackupComLivros(livrosParaIncluirArquivo) {
@@ -6371,10 +6433,10 @@ function gerarBackupComLivros(livrosParaIncluirArquivo) {
             if (arrayBuffer) pastaLivros.file(`${livro.id}.bin`, arrayBuffer);
         }).catch(() => {}).finally(marcarEtapaConcluida)
     )
-        .then(() => processarArquivosBackupEmLotes([...idsImagens], id =>
+        .then(() => processarMidiasSRSEmLotesComChecagemPrevia([...idsImagens], marcarEtapaConcluida, id =>
             carregarImagemSRS(id).then(blob => {
                 if (blob) pastaImagens.file(`${id}.jpg`, blob);
-            }).catch(() => {}).finally(marcarEtapaConcluida)
+            }).catch(() => {})
         ))
         // streamFiles: reduz o pico de memória do JSZip ao montar o zip final (não precisa saber o
         // tamanho comprimido de cada arquivo de antemão antes de escrevê-lo). onUpdate reporta o
@@ -6902,14 +6964,19 @@ function sincronizarMidiaComDriveAgora() {
     atualizarProgressoOperacao(0, pendentes.length, "🖼️", "Sincronizando mídia...");
     let concluidos = 0;
     const enviados = [];
-    processarArquivosBackupEmLotes(pendentes, id =>
+    const marcarConcluido = () => {
+        concluidos++;
+        atualizarProgressoOperacao(concluidos, pendentes.length, "🖼️", "Sincronizando mídia...");
+    };
+    // NOVO: a maioria dos IDs pendentes costuma nem existir localmente ainda (mídia baixada só sob
+    // demanda, ver carregarImagemSRSComFallbackDrive) — processarMidiasSRSEmLotesComChecagemPrevia
+    // descarta esses rapidamente (checagem em paralelo irrestrito) antes de aplicar o lote só a quem
+    // realmente precisa subir pro Drive.
+    processarMidiasSRSEmLotesComChecagemPrevia(pendentes, marcarConcluido, id =>
         carregarImagemSRS(id).then(blob => {
             if (!blob) return;
             return enviarMidiaParaDrive(id, blob).then(() => { enviados.push(id); });
-        }).catch(err => console.error(`Falha ao sincronizar mídia ${id}:`, err)).finally(() => {
-            concluidos++;
-            atualizarProgressoOperacao(concluidos, pendentes.length, "🖼️", "Sincronizando mídia...");
-        })
+        }).catch(err => console.error(`Falha ao sincronizar mídia ${id}:`, err))
     ).then(() => {
         if (!dados._syncMeta) dados._syncMeta = {};
         dados._syncMeta.midiaSincronizada = [...jaSincronizados, ...enviados];
@@ -7077,6 +7144,7 @@ function inicializarAppComSrsItems() {
     carregarPreferenciasTimer();
     aplicarTema();
     verificarContasAVencer();
+    inicializarSelectNivelParalelismoArquivos();
     atualizar();
     inicializarCalendario();
 

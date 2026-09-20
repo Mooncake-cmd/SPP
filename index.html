@@ -599,6 +599,20 @@
                 <button onclick="document.getElementById('importarArquivo').click()" class="btn-importar">Importar Backup</button>
                 <button onclick="confirmarResetTotal()" class="btn-resetar">Resetar Tudo</button>
             </div>
+            <div class="form-group">
+                <label for="select-nivel-paralelismo-arquivos" style="display: block; margin-bottom: 4px; font-size: 0.9em;">
+                    Velocidade ao processar arquivos (backup, sincronizar mídia, importar .apkg):
+                </label>
+                <select id="select-nivel-paralelismo-arquivos" onchange="definirNivelParalelismoArquivos(this.value)">
+                    <option value="conservador">🐢 Conservador (padrão — mais seguro em aparelhos com pouca memória)</option>
+                    <option value="equilibrado">🚶 Equilibrado</option>
+                    <option value="agressivo">🚀 Agressivo (aparelhos potentes — pode travar a aba em aparelhos fracos)</option>
+                </select>
+                <p style="color: var(--text-secondary); font-size: 0.8em; margin: 4px 0 0;">
+                    Só afeta ESTE aparelho/navegador (não sincroniza). Aumente se o seu aparelho for
+                    potente e a sincronização/importação estiver demorando mais do que devia.
+                </p>
+            </div>
             <hr style="margin: 16px 0; border-color: var(--border-color);">
             <h3 style="margin-bottom: 8px;">Sincronização automática (Google Drive)</h3>
             <p style="color: var(--text-secondary); font-size: 0.85em; margin-top: 0;">
