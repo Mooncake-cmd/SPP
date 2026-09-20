@@ -295,6 +295,20 @@ function resetDiario() {
 }
 
 function verificarGameOver() { if (dados.hp <= 0) document.getElementById("gameover-modal").classList.remove("modal-oculto"); }
+
+// NOVO: resetDiario()/verificarGameOver() ficam represados (ver aguardarChecagemInicialDoDrive, seção
+// de sincronização com o Drive) até o app ter tido uma chance curta de checar se existe uma versão mais
+// nova em outro aparelho — sem essa flag, um conflito resolvido depois via manterVersaoLocalDrive()
+// rodaria os dois de novo em cima de um HP que já foi decrementado, ou uma sincronização periódica no
+// meio da sessão (bem depois do carregamento) acabaria dando gatilho neles outra vez sem sentido.
+let resetDiarioEGameOverJaRodaram = false;
+function rodarResetDiarioEGameOverUmaVez() {
+    if (resetDiarioEGameOverJaRodaram) return;
+    resetDiarioEGameOverJaRodaram = true;
+    resetDiario();
+    verificarGameOver();
+    atualizar();
+}
 function fecharModalDano() { document.getElementById("dano-modal").classList.add("modal-oculto"); }
 function pontosParaProximoNivel(nivel) { return Math.floor(100 * Math.pow(1.1, nivel)); }
 
@@ -6494,6 +6508,9 @@ const SYNC_DRIVE_DEBOUNCE_MS = 20000; // espera 20s sem nenhuma mudança nova an
 // já que agendarSincronizacaoDrive só dispara em reação a uma mudança local (ver setInterval mais
 // abaixo, perto de inicializarAppComSrsItems).
 const SYNC_DRIVE_POLL_INTERVAL_MS = 120000; // a cada 2 minutos
+// NOVO: prazo máximo que o carregamento da página espera o Drive responder antes de rodar
+// resetDiario()/verificarGameOver() — ver aguardarChecagemInicialDoDrive.
+const ESPERA_MAXIMA_CHECAGEM_DRIVE_INICIAL_MS = 5000;
 
 let googleTokenClient = null;
 let googleAccessToken = null;
@@ -6567,6 +6584,41 @@ function desconectarGoogleDrive() {
 function tentarReconectarDriveAoCarregar() {
     if (localStorage.getItem("spp_drive_auto_conectar") !== "1") return;
     aguardarGoogleCarregado(() => conectarGoogleDrive(true));
+}
+
+// NOVO: dá uma chance CURTA (no máximo "prazoMs") pro Drive reconectar e checar se existe uma versão
+// mais nova em outro aparelho, ANTES de resetDiario()/verificarGameOver() rodarem (ver
+// inicializarAppComSrsItems/rodarResetDiarioEGameOverUmaVez). O motivo: os dois processam SÓ o que já
+// está salvo localmente e terminam chamando salvar(), que carimba _syncMeta.ultimaModificacaoEm = agora
+// — se isso acontecesse ANTES de o app sequer ter consultado o Drive (como era antes dessa mudança), um
+// aparelho pouco usado (ex: celular, quando o notebook é o principal) processava vários dias de
+// dano/game over em cima de dados desatualizados e, ao carimbar esse timestamp "agora", passava a
+// GANHAR a comparação de sincronização só por coincidência de horário — sobrescrevendo em silêncio o
+// progresso real do outro aparelho no Drive, sem nunca mostrar o aviso de conflito. Resolve (nunca
+// rejeita) assim que: (a) não há Drive conectado nesse navegador — retorna na hora, sem esperar nada;
+// (b) a 1ª tentativa de reconexão + a sincronizarComDrive() automática que ela dispara já terminaram
+// (sucesso, falha ou sem nada de novo); ou (c) o prazo estourou (rede lenta/offline) — nesse caso segue
+// com o comportamento de sempre, sem travar o app esperando rede indefinidamente. Não atrasa o resto do
+// app (tema, calendário, timer, a 1ª renderização de atualizar() em inicializarAppComSrsItems) — só o
+// PAR resetDiario/verificarGameOver espera por essa promise.
+function aguardarChecagemInicialDoDrive(prazoMs) {
+    if (localStorage.getItem("spp_drive_auto_conectar") !== "1") return Promise.resolve();
+    return new Promise(resolve => {
+        const prazoFinal = Date.now() + prazoMs;
+        let jaConectouUmaVez = false;
+        function checar() {
+            if (Date.now() >= prazoFinal) { resolve(); return; }
+            if (driveConectado) {
+                jaConectouUmaVez = true;
+                if (!driveSincronizando) { resolve(); return; } // já conectou e a 1ª checagem já terminou
+            } else if (jaConectouUmaVez) {
+                resolve(); return; // conectou e caiu de novo nesse meio-tempo — não vale mais esperar
+            }
+            setTimeout(checar, 100);
+        }
+        tentarReconectarDriveAoCarregar();
+        setTimeout(checar, 200); // dá um instante pro requestAccessToken silencioso dar o 1º passo
+    });
 }
 
 function aguardarGoogleCarregado(callback, tentativas) {
@@ -6697,6 +6749,11 @@ function manterVersaoLocalDrive() {
     if (banner) banner.classList.add("oculto");
     // a versão local "ganha" a partir de agora -- sobrescreve a que estava no Drive com a de cá
     enviarParaDrive(driveArquivoIdCache, dados).catch(err => console.error("Falha ao subir a versão local pro Drive:", err));
+    // NOVO: se resetDiario()/verificarGameOver() ficaram represados esperando essa decisão (ver
+    // aguardarChecagemInicialDoDrive/inicializarAppComSrsItems), rodam agora que o usuário confirmou de
+    // propósito que quer seguir com os dados locais mesmo assim. Não faz nada se já tinham rodado antes
+    // (ver rodarResetDiarioEGameOverUmaVez) — ex: um conflito que apareceu bem depois, no meio da sessão.
+    rodarResetDiarioEGameOverUmaVez();
 }
 
 function atualizarUiSincronizacaoDrive() {
@@ -7017,14 +7074,26 @@ function fecharModalDiaCalendario() {
 // veio populado do JSON do localStorage (jeito antigo) em vez de zerar, e marca como "alterado" pra a
 // 1ª salvar() da sessão migrar esse valor pro IndexedDB de vez.
 function inicializarAppComSrsItems() {
-    resetDiario();
-    verificarGameOver();
     carregarPreferenciasTimer();
     aplicarTema();
     verificarContasAVencer();
     atualizar();
     inicializarCalendario();
-    tentarReconectarDriveAoCarregar(); // fire-and-forget: nunca atrasa o 1º render do app
+
+    // NOVO: resetDiario()/verificarGameOver() são adiados até essa checagem resolver — nunca atrasam o
+    // que já rodou acima (tema, calendário, timer, a 1ª atualizar()), só o cálculo de dano/game over em
+    // si. Ver aguardarChecagemInicialDoDrive pro motivo (evitar sobrescrever em silêncio o progresso de
+    // outro aparelho no Drive) — cobre tanto o caso comum (Drive não conectado ou sem nada mais novo,
+    // resolve rápido) quanto o de rede lenta/offline (resolve no máximo em
+    // ESPERA_MAXIMA_CHECAGEM_DRIVE_INICIAL_MS, sem travar o app esperando pra sempre).
+    aguardarChecagemInicialDoDrive(ESPERA_MAXIMA_CHECAGEM_DRIVE_INICIAL_MS).then(() => {
+        // Um conflito apareceu nesse meio-tempo — deixa o usuário decidir primeiro (banner já visível,
+        // ver avisarConflitoSincronizacaoDrive). resetDiario()/verificarGameOver() rodam só depois, via
+        // manterVersaoLocalDrive() (se ele escolher ficar com o local) ou nunca (se escolher usar a
+        // versão remota, que recarrega a página com os dados corretos e roda tudo de novo do zero).
+        if (dadosRemotosPendentesConflito) return;
+        rodarResetDiarioEGameOverUmaVez();
+    });
 
     // NOVO: checagem periódica do Drive (ver SYNC_DRIVE_POLL_INTERVAL_MS) — sincronizarComDrive() já
     // não faz nada se driveConectado for false, então um setInterval único e incondicional é
