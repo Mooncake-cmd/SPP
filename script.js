@@ -3329,7 +3329,11 @@ function renderizarCardNaAreaRevisao(card) {
                 : (card.resposta ? escaparComHtmlProtegido(card.resposta) : '<em style="color:var(--text-secondary);">(sem resposta cadastrada)</em>')));
     const blocoResposta = temAreaResposta ? `<div id="srs-resposta-area" class="oculto" style="margin-top: 15px; padding-top: 15px; border-top: 1px dashed var(--border-color); font-size: 1em; color: var(--secondary-color);"><div id="srs-imagem-resposta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-resposta-atual" class="srs-card-midia oculto"></div>${corpoResposta}</div>` : "";
     const avisoPreview = modoPreviewSRS ? `<div class="srs-preview-banner">🔍 Pré-visualização — não conta para o histórico de revisões <button onclick="sairDoPreviewSRS()">Voltar para a fila</button></div>` : "";
-    areaDisplay.innerHTML = `${avisoPreview}<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(card.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${card.intervalo_atual} dias</div>`;
+    // NOVO: última data de revisão ANTERIOR desse card, discreta ao lado do intervalo atual — omitida
+    // por completo quando o card nunca foi revisado (ver dataUltimaRevisaoAnterior).
+    const ultimaRevisao = dataUltimaRevisaoAnterior(card.id);
+    const textoUltimaRevisao = ultimaRevisao ? ` · Última revisão: ${ultimaRevisao}` : "";
+    areaDisplay.innerHTML = `${avisoPreview}<div style="font-size: 0.9em; color: var(--secondary-color); margin-bottom:10px;">${escaparHtml(card.tema)}</div><div id="srs-imagem-pergunta-atual" class="srs-card-imagem oculto"></div><div id="srs-midia-pergunta-atual" class="srs-card-midia oculto"></div><div id="srs-pergunta-atual" style="font-size: 1.4em; font-weight: bold;">${perguntaHtml}</div>${blocoResposta}<div style="margin-top: 15px; font-size: 0.8em; color: #999;">Intervalo atual: ${card.intervalo_atual} dias${textoUltimaRevisao}</div>`;
     controls.classList.add("oculto");
     if (btnRevelar) btnRevelar.classList.remove("oculto");
     feedback.innerText = "Pense na resposta e depois revele.";
@@ -3668,6 +3672,18 @@ function mudarPaginaListaSRS(delta) {
 function idsCardsRevisadosHoje() {
     const hojeData = hojeISO();
     return new Set(dados.srsRevisoesLog.filter(r => r.data === hojeData).map(r => r.cardId));
+}
+
+// Data (formatada dd/mm/aaaa) da última vez que ESSE card foi revisado antes de agora — null quando
+// nunca foi revisado (card novo, ou importado do Anki e ainda não revisado aqui: o histórico de
+// revisão de dentro do Anki não é importado, só o que acontece a partir daqui). Usa dataHora (não só
+// "data") pra desempatar corretamente revisões feitas no mesmo dia. Preview não grava em
+// dados.srsRevisoesLog (ver processarRevisaoSRS/visualizarCardSRS), então nunca altera esse valor.
+function dataUltimaRevisaoAnterior(cardId) {
+    const revisoes = dados.srsRevisoesLog.filter(r => r.cardId === cardId);
+    if (revisoes.length === 0) return null;
+    const maisRecente = revisoes.reduce((a, b) => (a.dataHora > b.dataHora ? a : b));
+    return new Date(maisRecente.dataHora).toLocaleDateString("pt-BR");
 }
 
 let srsListaFiltroRevisadosHoje = false;
