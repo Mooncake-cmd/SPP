@@ -427,9 +427,34 @@ function alternarItem(index, marcado) {
     }
     item.feito = marcado; salvar();
 }
+// NOVO: "trancar" uma missão por N dias — enquanto travada, nome/descrição, valor em pontos,
+// atributos, chefão vinculado e a própria exclusão ficam bloqueados. Concluir/desconcluir (checkbox)
+// continua livre de propósito — trancar não deveria impedir de cumprir a missão, só de alterá-la ou
+// apagá-la pra escapar dela. Destrava sozinha quando a data passa (comparação contra hojeISO(), sem
+// job nenhum) — de propósito não existe destravar manualmente antes da data: isso quebraria o
+// propósito da trava.
+function estaMissaoTravada(item) {
+    return !!(item && item.travadaAte && item.travadaAte >= hojeISO());
+}
+function textoMissaoTravadaAte(item) {
+    return new Date(item.travadaAte + "T00:00:00").toLocaleDateString("pt-BR");
+}
+function travarMissao(index) {
+    const item = dados.itens[index];
+    if (!item) return;
+    if (estaMissaoTravada(item)) { alert(`Essa missão já está trancada até ${textoMissaoTravadaAte(item)}.`); return; }
+    const dias = parseInt(prompt("Trancar essa missão por quantos dias? (nome, valor, atributos, chefão vinculado e exclusão ficam bloqueados até lá)"), 10);
+    if (!dias || dias <= 0) return;
+    const data = new Date();
+    data.setDate(data.getDate() + dias);
+    item.travadaAte = dataParaIsoLocal(data);
+    salvar();
+}
+
 function removerItem(index) {
+    const item = dados.itens[index];
+    if (item && estaMissaoTravada(item)) { alert(`Essa missão está trancada até ${textoMissaoTravadaAte(item)} — não pode ser excluída até lá.`); return; }
     if (confirm("Excluir?")) {
-        let item = dados.itens[index];
         if (item.feito) {
             const pontosConcedidos = item.ultimoValorConcedido !== undefined ? item.ultimoValorConcedido : (parseInt(item.pontos) || 0);
             dados.pontosAcumulados -= pontosConcedidos;
@@ -440,7 +465,13 @@ function removerItem(index) {
         dados.itens.splice(index, 1); salvar();
     }
 }
-function editarCampo(index, campo, novoValor) { dados.itens[index][campo] = novoValor; salvar(); }
+function editarCampo(index, campo, novoValor) {
+    const item = dados.itens[index];
+    if (!item) return;
+    if (estaMissaoTravada(item)) { alert(`Essa missão está trancada até ${textoMissaoTravadaAte(item)} — não pode ser editada até lá.`); atualizar(); return; }
+    item[campo] = novoValor;
+    salvar();
+}
 
 // ============================================================
 // === CHEFÕES (boss battles) — ciclo de vida: Ativo (Em Combate) <-> Selado no Tártaro ===
@@ -551,8 +582,10 @@ function mostrarModalBossDerrotado(chefao) {
 function fecharModalBoss() { document.getElementById("boss-derrotado-modal").classList.add("modal-oculto"); }
 
 function editarChefaoDaMissao(index, valor) {
-    if (!dados.itens[index]) return;
-    dados.itens[index].chefaoId = valor ? parseInt(valor) : null;
+    const item = dados.itens[index];
+    if (!item) return;
+    if (estaMissaoTravada(item)) { alert(`Essa missão está trancada até ${textoMissaoTravadaAte(item)} — não pode ser editada até lá.`); atualizar(); return; }
+    item.chefaoId = valor ? parseInt(valor) : null;
     salvar();
 }
 
@@ -670,9 +703,12 @@ function renderizarChefoes() {
     }
 }
 function editarCampoNumerico(index, campo, valor) {
+    const item = dados.itens[index];
+    if (!item) return;
+    if (estaMissaoTravada(item)) { alert(`Essa missão está trancada até ${textoMissaoTravadaAte(item)} — não pode ser editada até lá.`); atualizar(); return; }
     const num = parseInt(valor);
     if (isNaN(num) || num <= 0) { salvar(); return; } // valor inválido: apenas re-renderiza e mantém o antigo
-    dados.itens[index][campo] = num; salvar();
+    item[campo] = num; salvar();
 }
 
 /* === OBJETIVOS === */
@@ -5304,12 +5340,18 @@ function atualizar() {
                                 let pontosEfetivos = calcularPontosEscalonados(item);
                 let healAmount = Math.ceil(pontosEfetivos / 2) || 1;
                 let diasAtraso = item.diasSeguidosIncompleta || 0;
+                // NOVO: enquanto travada, os campos editáveis da linha ficam contenteditable="false" e o
+                // select/botão de excluir ficam disabled — feedback visual imediato, sem precisar tentar
+                // editar e levar o alerta (que continua existindo como reforço, ver editarCampo etc.).
+                const travada = estaMissaoTravada(item);
                 let celulaPontos = diasAtraso > 0
-                    ? `<span contenteditable="true" onblur="editarCampoNumerico(${item.originalIndex}, 'pontos', this.innerText)">${item.pontos}</span> <strong style="color:var(--danger-color);">(hoje: ${pontosEfetivos} XP)</strong> / +${healAmount} HP`
-                    : `<span contenteditable="true" onblur="editarCampoNumerico(${item.originalIndex}, 'pontos', this.innerText)">${item.pontos}</span> XP / +${healAmount} HP`;
+                    ? `<span contenteditable="${travada ? "false" : "true"}" onblur="editarCampoNumerico(${item.originalIndex}, 'pontos', this.innerText)">${item.pontos}</span> <strong style="color:var(--danger-color);">(hoje: ${pontosEfetivos} XP)</strong> / +${healAmount} HP`
+                    : `<span contenteditable="${travada ? "false" : "true"}" onblur="editarCampoNumerico(${item.originalIndex}, 'pontos', this.innerText)">${item.pontos}</span> XP / +${healAmount} HP`;
                 let seloAtraso = diasAtraso > 0 ? `<br><span class="srs-tag" style="background:var(--danger-bg); color:var(--danger-color); margin-top:4px;">🔥 ${diasAtraso}x atrasada</span>` : "";
-                let celulaChefao = `<select onchange="editarChefaoDaMissao(${item.originalIndex}, this.value)">${opcoesChefaoHtml(item.chefaoId)}</select>`;
-                html += `<tr><td><input type='checkbox' ${item.feito ? 'checked' : ''} onchange='alternarItem(${item.originalIndex}, this.checked)'></td><td contenteditable="true" onblur="editarCampo(${item.originalIndex}, 'descricao', this.innerText)">${escaparHtml(item.descricao)}</td><td>${celulaPontos}</td><td contenteditable="true" onblur="editarCampo(${item.originalIndex}, 'atributos', this.innerText)">${escaparHtml(item.atributos)}</td><td><span class="srs-tag">${textoRecorrencia(item)}</span>${seloAtraso}</td><td>${celulaChefao}</td><td><button onclick='removerItem(${item.originalIndex})'>🗑️</button></td></tr>`;
+                let seloTravada = travada ? `<br><span class="srs-tag" style="background:#3a2a00; color:#e0a800; margin-top:4px;">🔒 até ${textoMissaoTravadaAte(item)}</span>` : "";
+                let celulaChefao = `<select onchange="editarChefaoDaMissao(${item.originalIndex}, this.value)" ${travada ? "disabled" : ""}>${opcoesChefaoHtml(item.chefaoId)}</select>`;
+                let botaoTrava = `<button onclick='travarMissao(${item.originalIndex})' title="${travada ? "Trancada até " + textoMissaoTravadaAte(item) : "Trancar essa missão"}">${travada ? "🔒" : "🔓"}</button>`;
+                html += `<tr><td><input type='checkbox' ${item.feito ? 'checked' : ''} onchange='alternarItem(${item.originalIndex}, this.checked)'></td><td contenteditable="${travada ? "false" : "true"}" onblur="editarCampo(${item.originalIndex}, 'descricao', this.innerText)">${escaparHtml(item.descricao)}${seloTravada}</td><td>${celulaPontos}</td><td contenteditable="${travada ? "false" : "true"}" onblur="editarCampo(${item.originalIndex}, 'atributos', this.innerText)">${escaparHtml(item.atributos)}</td><td><span class="srs-tag">${textoRecorrencia(item)}</span>${seloAtraso}</td><td>${celulaChefao}</td><td>${botaoTrava}<button onclick='removerItem(${item.originalIndex})' ${travada ? "disabled" : ""}>🗑️</button></td></tr>`;
             });
             area.innerHTML += html + "</tbody></table></div>";
         }
