@@ -252,7 +252,7 @@ button:hover { filter: brightness(0.9); }
 [contenteditable="true"]:focus { background: var(--input-bg); outline: 2px solid var(--secondary-color); }
 
 /* MODAIS */
-#level-up-modal, #dano-modal, #gameover-modal, #confirmacao-perigosa-modal, #prateleira-modal, #srs-temas-modal, #exportar-backup-modal, #desenho-imagem-modal, #progresso-operacao-modal, #resultado-importacao-modal, #boss-derrotado-modal, #calendario-dia-modal, #srs-excluir-temas-modal, #srs-limites-novos-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; }
+#level-up-modal, #dano-modal, #gameover-modal, #confirmacao-perigosa-modal, #prateleira-modal, #srs-temas-modal, #exportar-backup-modal, #desenho-imagem-modal, #progresso-operacao-modal, #resultado-importacao-modal, #boss-derrotado-modal, #calendario-dia-modal, #srs-excluir-temas-modal, #srs-limites-novos-modal, #mover-tema-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: flex; justify-content: center; align-items: center; z-index: 1000; }
 .modal-oculto { display: none !important; }
 .modal-content { background: white; padding: 40px; border-radius: 20px; text-align: center; max-width: 400px; animation: pop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
 @keyframes pop { from { transform: scale(0.5); opacity: 0; } to { transform: scale(1); opacity: 1; } }
@@ -479,6 +479,13 @@ button:hover { filter: brightness(0.9); }
 .srs-arvore-label span { vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
 .btn-excluir-tema { background: none; border: none; color: var(--danger-color); padding: 0 4px; font-size: 0.85em; cursor: pointer; flex: none; }
 .btn-excluir-tema:hover { opacity: 0.7; }
+.btn-renomear-tema, .btn-mover-tema { background: none; border: none; color: var(--text-secondary); padding: 0 4px; font-size: 0.85em; cursor: pointer; flex: none; }
+.btn-renomear-tema:hover, .btn-mover-tema:hover { opacity: 0.7; }
+/* NOVO: arrastar um tema pra dentro de outro (ver arrastarTemaInicio/arrastarTemaSoltar, script.js) —
+   mesmo padrão visual já usado pra reordenar os marcos dos objetivos (.marco-item.arrastando/
+   .drag-over-marco), só que escopado pra linha da árvore de temas. */
+.srs-arvore-linha.arrastando { opacity: 0.4; }
+.srs-arvore-linha.drag-over-tema { border-radius: 6px; outline: 2px solid var(--secondary-color); outline-offset: -2px; }
 .srs-arvore-filhos.oculto { display: none; }
 .srs-temas-acoes { display: flex; gap: 10px; margin-bottom: 10px; }
 .srs-temas-acoes button { font-size: 0.8em; padding: 6px 10px; flex: 1; }

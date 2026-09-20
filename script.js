@@ -1413,7 +1413,16 @@ function renderizarNoTemaHTML(node) {
     const seta = temFilhos
         ? `<span class="srs-arvore-seta" onclick="alternarExpansaoTema('${node.caminho}', event)">${expandido ? '▾' : '▸'}</span>`
         : `<span class="srs-arvore-seta-vazia"></span>`;
-    let html = `<li class="srs-arvore-item"><div class="srs-arvore-linha"><label class="srs-arvore-label">${seta}<input type="checkbox" ${estado === 'marcado' ? 'checked' : ''} ${estado === 'indeterminado' ? 'data-indeterminado="true"' : ''} onclick="alternarSelecaoTema('${node.caminho}')"><span>${escaparHtml(node.nome)}</span></label><button type="button" class="btn-excluir-tema" onclick="excluirTema('${node.caminho}')" title="Excluir este tema e todos os cards dele">🗑️</button></div>`;
+    // NOVO: draggable + eventos de arrastar (arrastarTemaInicio/Sobre/Sai/Soltar/Fim) — arrastar esse
+    // tema pra cima de outro nó da árvore o move pra dentro dele (mesma reescrita de prefixo usada pelo
+    // botão "📁 Mover" e por renomearTemaSRS — ver comentário em reescreverPrefixoTemaSRS). Só funciona
+    // com mouse (desktop); o botão "📁" abaixo é a via que também funciona em celular/touch.
+    let html = `<li class="srs-arvore-item"><div class="srs-arvore-linha" draggable="true"
+        ondragstart="arrastarTemaInicio(event, '${node.caminho}')"
+        ondragover="arrastarTemaSobre(event, '${node.caminho}')"
+        ondragleave="arrastarTemaSai(event)"
+        ondrop="arrastarTemaSoltar(event, '${node.caminho}')"
+        ondragend="arrastarTemaFim(event)"><label class="srs-arvore-label">${seta}<input type="checkbox" ${estado === 'marcado' ? 'checked' : ''} ${estado === 'indeterminado' ? 'data-indeterminado="true"' : ''} onclick="alternarSelecaoTema('${node.caminho}')"><span>${escaparHtml(node.nome)}</span></label><button type="button" class="btn-renomear-tema" onclick="renomearTemaSRS('${node.caminho}')" title="Renomear este tema">✏️</button><button type="button" class="btn-mover-tema" onclick="abrirModalMoverTema('${node.caminho}')" title="Mover este tema pra dentro de outro">📁</button><button type="button" class="btn-excluir-tema" onclick="excluirTema('${node.caminho}')" title="Excluir este tema e todos os cards dele">🗑️</button></div>`;
     if (temFilhos) {
         html += `<ul class="srs-arvore-filhos ${expandido ? '' : 'oculto'}">`;
         Object.values(node.filhos).sort((a,b) => a.nome.localeCompare(b.nome)).forEach(filho => { html += renderizarNoTemaHTML(filho); });
@@ -1453,6 +1462,160 @@ function abrirModalTemasSRS() {
     document.getElementById("srs-temas-modal").classList.remove("modal-oculto");
 }
 function fecharModalTemasSRS() { document.getElementById("srs-temas-modal").classList.add("modal-oculto"); }
+
+// ============================================================
+// === RENOMEAR / MOVER TEMA (reescrita de prefixo em lote) ===
+// ============================================================
+// Não existe uma entidade "deck" separada nesse app — cada card só guarda uma string livre em
+// item.tema, e a hierarquia "Tema::Subtema" (ver construirArvoreTemas) é só o "::" cortando essa
+// string. Por isso "renomear um tema" e "mover um tema pra dentro de outro" são a MESMA operação por
+// baixo dos panos: reescrever o PREFIXO do caminho em todos os cards que pertencem a ele (e aos
+// subtemas dele) — reaproveita a mesma árvore/coleta de caminhos já usada por excluirTema.
+// Retorna quantos cards foram alterados (0 se não achou nada, ou se o caminho novo é igual ao antigo).
+function reescreverPrefixoTemaSRS(caminhoAntigo, caminhoNovo) {
+    caminhoAntigo = (caminhoAntigo || "").trim();
+    caminhoNovo = (caminhoNovo || "").trim();
+    if (!caminhoNovo || caminhoAntigo === caminhoNovo) return 0;
+    let alterados = 0;
+    dados.srsItems.forEach(item => {
+        if (item.tema === caminhoAntigo) { item.tema = caminhoNovo; alterados++; }
+        else if (item.tema.startsWith(caminhoAntigo + "::")) { item.tema = caminhoNovo + item.tema.slice(caminhoAntigo.length); alterados++; }
+    });
+    if (alterados === 0) return 0;
+    srsItemsAlterado = true;
+
+    // NOVO: migra/limpa o limite de cards novos por dia configurado por tema-RAIZ (ver
+    // srsLimitesNovosPorTema/temaRaizSRS) — sem isso, um limite customizado ficava "órfão" (associado a
+    // um nome de raiz que nenhum card usa mais) depois de renomear ou mover um tema-raiz.
+    const raizAntiga = temaRaizSRS(caminhoAntigo);
+    const raizNova = temaRaizSRS(caminhoNovo);
+    if (raizAntiga !== raizNova && dados.srsLimitesNovosPorTema) {
+        // Renomeação de raiz PURA (o tema continua no mesmo nível, só muda de nome) migra o valor pro
+        // nome novo. Mover pra dentro de outro tema (caminhoNovo ganhou um "::" na frente) NÃO migra —
+        // a partir de agora esses cards passam a valer a cota da raiz de DESTINO, que pode já ter sua
+        // própria configuração; copiar o valor antigo por cima seria sobrescrever sem querer.
+        const eraRenomeacaoDeRaizPura = !caminhoAntigo.includes("::") && !caminhoNovo.includes("::");
+        if (eraRenomeacaoDeRaizPura && Object.prototype.hasOwnProperty.call(dados.srsLimitesNovosPorTema, raizAntiga)) {
+            dados.srsLimitesNovosPorTema[raizNova] = dados.srsLimitesNovosPorTema[raizAntiga];
+        }
+        const raizAntigaAindaExiste = dados.srsItems.some(i => temaRaizSRS(i.tema) === raizAntiga);
+        if (!raizAntigaAindaExiste) delete dados.srsLimitesNovosPorTema[raizAntiga];
+    }
+    return alterados;
+}
+
+// Se o caminho de destino já existir (ou já tiver subtemas), os cards vão simplesmente se juntar aos
+// que já estão lá — não é um erro, mas costuma ser sem querer, então confirma antes.
+function confirmarFusaoDeTemaSeNecessario(caminhoNovo) {
+    const existe = srsTemasConhecidos.has(caminhoNovo) || [...srsTemasConhecidos].some(t => t.startsWith(caminhoNovo + "::"));
+    if (!existe) return true;
+    return confirm(`Já existe um tema "${caminhoNovo}". Os cards vão se juntar nele. Continuar?`);
+}
+
+// Aplica o resultado de uma reescrita bem-sucedida: atualiza os Sets de tema (sincronizarTemasSRS já
+// remove o caminho antigo e adiciona o novo, comparando com dados.srsItems), redesenha a árvore sem
+// fechar o modal, e persiste.
+function finalizarReescritaDeTemaSRS(caminhoAntigo, caminhoNovo) {
+    srsNosExpandidos.delete(caminhoAntigo);
+    srsNosExpandidos.add(caminhoNovo);
+    sincronizarTemasSRS();
+    renderizarArvoreTemasSRS();
+    salvar();
+}
+
+function renomearTemaSRS(caminho) {
+    const node = encontrarNoPorCaminho(arvoreTemasSRS, caminho);
+    if (!node) return;
+    const novoNome = prompt(`Renomear "${node.nome}" para:`, node.nome);
+    if (novoNome === null) return; // cancelou
+    const novoNomeLimpo = novoNome.trim();
+    if (!novoNomeLimpo) { alert("O nome não pode ficar vazio."); return; }
+    if (novoNomeLimpo.includes("::")) { alert('O nome não pode conter "::" — é o separador usado pra indicar subtema. Pra mover esse tema pra dentro de outro, use o botão "📁 Mover".'); return; }
+    const partesPai = caminho.split("::").slice(0, -1);
+    const caminhoNovo = [...partesPai, novoNomeLimpo].join("::");
+    if (caminhoNovo === caminho) return;
+    if (!confirmarFusaoDeTemaSeNecessario(caminhoNovo)) return;
+    const alterados = reescreverPrefixoTemaSRS(caminho, caminhoNovo);
+    if (alterados === 0) return;
+    finalizarReescritaDeTemaSRS(caminho, caminhoNovo);
+}
+
+// === Mover tema pra dentro de outro — via botão (funciona em qualquer aparelho, inclusive celular) ===
+// Restrito de propósito a mover pra dentro de um tema-RAIZ existente (não um subtema arbitrário) — é o
+// caso de uso pedido ("arrastar um deck pra dentro de outro") e evita todo o problema de detectar ciclo
+// (mover um tema pra dentro de um dos seus próprios subtemas): como só oferece raízes como destino, e a
+// própria raiz do tema sendo movido já sai da lista, não tem como cair dentro de si mesmo.
+let temaMoverOrigem = null;
+function abrirModalMoverTema(caminho) {
+    const node = encontrarNoPorCaminho(arvoreTemasSRS, caminho);
+    if (!node) return;
+    temaMoverOrigem = caminho;
+    document.getElementById("mover-tema-titulo").innerText = `Mover "${node.nome}" para dentro de:`;
+    const raizAtual = temaRaizSRS(caminho);
+    const raizesPossiveis = [...new Set([...srsTemasConhecidos].map(temaRaizSRS))]
+        .filter(r => r !== raizAtual)
+        .sort((a, b) => a.localeCompare(b, "pt-BR"));
+    const select = document.getElementById("select-mover-tema-destino");
+    select.innerHTML = `<option value="">🔝 Tema-raiz (tirar de dentro de qualquer tema)</option>` +
+        raizesPossiveis.map(r => `<option value="${escaparHtml(r)}">${escaparHtml(r)}</option>`).join("");
+    document.getElementById("mover-tema-modal").classList.remove("modal-oculto");
+}
+function fecharModalMoverTema() {
+    document.getElementById("mover-tema-modal").classList.add("modal-oculto");
+    temaMoverOrigem = null;
+}
+function confirmarMoverTemaSRS() {
+    if (!temaMoverOrigem) { fecharModalMoverTema(); return; }
+    const node = encontrarNoPorCaminho(arvoreTemasSRS, temaMoverOrigem);
+    if (!node) { fecharModalMoverTema(); return; }
+    const destino = document.getElementById("select-mover-tema-destino").value;
+    const caminhoNovo = destino ? `${destino}::${node.nome}` : node.nome;
+    const origem = temaMoverOrigem;
+    if (caminhoNovo === origem) { fecharModalMoverTema(); return; }
+    if (!confirmarFusaoDeTemaSeNecessario(caminhoNovo)) return;
+    const alterados = reescreverPrefixoTemaSRS(origem, caminhoNovo);
+    fecharModalMoverTema();
+    if (alterados === 0) return;
+    finalizarReescritaDeTemaSRS(origem, caminhoNovo);
+}
+
+// === Mover tema arrastando (desktop) — mesma reescrita de prefixo, só que soltando em cima de OUTRO
+// nó da própria árvore (pode ser raiz ou subtema, diferente do modal acima que só oferece raízes) ===
+let temaArrastandoCaminho = null;
+function arrastarTemaInicio(event, caminho) {
+    temaArrastandoCaminho = caminho;
+    event.currentTarget.classList.add("arrastando");
+    event.dataTransfer.effectAllowed = "move";
+}
+function arrastarTemaSobre(event, caminhoDestino) {
+    if (!temaArrastandoCaminho || caminhoDestino === temaArrastandoCaminho || caminhoDestino.startsWith(temaArrastandoCaminho + "::")) return;
+    event.preventDefault();
+    event.currentTarget.classList.add("drag-over-tema");
+}
+function arrastarTemaSai(event) {
+    event.currentTarget.classList.remove("drag-over-tema");
+}
+function arrastarTemaSoltar(event, caminhoDestino) {
+    event.preventDefault();
+    event.currentTarget.classList.remove("drag-over-tema");
+    const origem = temaArrastandoCaminho;
+    temaArrastandoCaminho = null;
+    if (!origem || caminhoDestino === origem || caminhoDestino.startsWith(origem + "::")) return;
+    const nodeOrigem = encontrarNoPorCaminho(arvoreTemasSRS, origem);
+    if (!nodeOrigem) return;
+    const caminhoNovo = `${caminhoDestino}::${nodeOrigem.nome}`;
+    if (caminhoNovo === origem) return;
+    if (!confirmarFusaoDeTemaSeNecessario(caminhoNovo)) return;
+    const alterados = reescreverPrefixoTemaSRS(origem, caminhoNovo);
+    if (alterados === 0) return;
+    srsNosExpandidos.add(caminhoDestino); // expande o destino pra já mostrar onde caiu
+    finalizarReescritaDeTemaSRS(origem, caminhoNovo);
+}
+function arrastarTemaFim(event) {
+    event.currentTarget.classList.remove("arrastando");
+    document.querySelectorAll(".srs-arvore-linha.drag-over-tema").forEach(el => el.classList.remove("drag-over-tema"));
+    temaArrastandoCaminho = null;
+}
 
 // Apaga do IndexedDB as imagens/áudios anexados a um card SRS (chamado antes de remover o card dos
 // dados, senão o arquivo fica órfão guardado pra sempre, ocupando espaço à toa).
