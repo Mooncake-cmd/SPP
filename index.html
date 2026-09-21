@@ -41,6 +41,19 @@
             <div class="calendario-dias-semana"><span>D</span><span>S</span><span>T</span><span>Q</span><span>Q</span><span>S</span><span>S</span></div>
             <div class="calendario-grade" id="calendario-grade"></div>
         </div>
+
+        <!-- NOVO: painel inline (não mais modal) -- mostra os avisos do dia SELECIONADO automaticamente
+             (hoje, por padrão, ver inicializarCalendario) sem precisar clicar em nada; clicar num dia da
+             grade acima passa a ser só uma forma opcional de ver/gerenciar lembretes de OUTRO dia. -->
+        <div class="calendario-painel-dia" id="calendario-painel-dia">
+            <div class="calendario-painel-titulo" id="calendario-dia-titulo"></div>
+            <div id="calendario-dia-eventos"></div>
+            <div id="calendario-dia-lembretes-lista"></div>
+            <div class="calendario-add-lembrete">
+                <input type="text" id="input-novo-lembrete" placeholder="Novo lembrete..." onkeydown="if(event.key==='Enter') adicionarLembrete()">
+                <button onclick="adicionarLembrete()">+</button>
+            </div>
+        </div>
     </nav>
 
     <main class="container">
@@ -641,20 +654,6 @@
         📡 Uma versão mais nova foi sincronizada de outro aparelho.
         <button onclick="usarVersaoRemotaDrive()" style="margin-left: 8px;">Usar a versão nova</button>
         <button onclick="manterVersaoLocalDrive()" style="background: var(--text-secondary); margin-left: 4px;">Manter esta e sobrescrever</button>
-    </div>
-
-    <div id="calendario-dia-modal" class="modal-oculto">
-        <div class="modal-content calendario-dia-modal-content">
-            <h3 id="calendario-dia-titulo"></h3>
-            <div id="calendario-dia-eventos"></div>
-            <h4>Lembretes</h4>
-            <div id="calendario-dia-lembretes-lista"></div>
-            <div class="calendario-add-lembrete">
-                <input type="text" id="input-novo-lembrete" placeholder="Novo lembrete..." onkeydown="if(event.key==='Enter') adicionarLembrete()">
-                <button onclick="adicionarLembrete()">+</button>
-            </div>
-            <button onclick="fecharModalDiaCalendario()" style="margin-top:15px; background: var(--text-secondary);">Fechar</button>
-        </div>
     </div>
 
     <div id="level-up-modal" class="modal-oculto">

@@ -1452,7 +1452,7 @@ function renderizarNoTemaHTML(node) {
         ondragover="arrastarTemaSobre(event, '${node.caminho}')"
         ondragleave="arrastarTemaSai(event)"
         ondrop="arrastarTemaSoltar(event, '${node.caminho}')"
-        ondragend="arrastarTemaFim(event)"><label class="srs-arvore-label">${seta}<input type="checkbox" ${estado === 'marcado' ? 'checked' : ''} ${estado === 'indeterminado' ? 'data-indeterminado="true"' : ''} onclick="alternarSelecaoTema('${node.caminho}')"><span>${escaparHtml(node.nome)}</span></label><button type="button" class="btn-renomear-tema" onclick="renomearTemaSRS('${node.caminho}')" title="Renomear este tema">✏️</button><button type="button" class="btn-mover-tema" onclick="abrirModalMoverTema('${node.caminho}')" title="Mover este tema pra dentro de outro">📁</button><button type="button" class="btn-excluir-tema" onclick="excluirTema('${node.caminho}')" title="Excluir este tema e todos os cards dele">🗑️</button></div>`;
+        ondragend="arrastarTemaFim(event)"><label class="srs-arvore-label">${seta}<input type="checkbox" ${estado === 'marcado' ? 'checked' : ''} ${estado === 'indeterminado' ? 'data-indeterminado="true"' : ''} onclick="alternarSelecaoTema('${node.caminho}')"><span>${escaparHtml(node.nome)}</span></label><div class="srs-arvore-acoes"><button type="button" class="btn-renomear-tema" onclick="renomearTemaSRS('${node.caminho}')" title="Renomear este tema">✏️</button><button type="button" class="btn-mover-tema" onclick="abrirModalMoverTema('${node.caminho}')" title="Mover este tema pra dentro de outro">📁</button><button type="button" class="btn-excluir-tema" onclick="excluirTema('${node.caminho}')" title="Excluir este tema e todos os cards dele">🗑️</button></div></div>`;
     if (temFilhos) {
         html += `<ul class="srs-arvore-filhos ${expandido ? '' : 'oculto'}">`;
         Object.values(node.filhos).sort((a,b) => a.nome.localeCompare(b.nome)).forEach(filho => { html += renderizarNoTemaHTML(filho); });
@@ -7488,12 +7488,16 @@ const NOMES_MESES_CALENDARIO = ["Janeiro","Fevereiro","Março","Abril","Maio","J
 const NOMES_DIAS_SEMANA_CALENDARIO = ["Domingo","Segunda","Terça","Quarta","Quinta","Sexta","Sábado"];
 
 let calendarioMesExibido = null; // Date do 1º dia do mês exibido no mini-calendário
-let calendarioDiaModalAberto = null; // data ISO do dia aberto no modal (pra saber onde adicionar/remover lembrete)
+let calendarioDiaSelecionado = null; // data ISO do dia mostrado no painel (pra saber onde adicionar/remover lembrete)
 
 function inicializarCalendario() {
     const hoje = new Date();
     calendarioMesExibido = new Date(hoje.getFullYear(), hoje.getMonth(), 1);
     renderizarCalendario();
+    // NOVO: painel de avisos do dia mostrado automaticamente pra HOJE assim que o calendário carrega —
+    // antes só aparecia dentro de um modal, depois de clicar no dia. Clicar num dia da grade continua
+    // funcionando, mas agora é só uma forma opcional de ver/gerenciar lembretes de outro dia.
+    selecionarDiaCalendario(hojeISO());
 }
 
 function mudarMesCalendario(delta) {
@@ -7568,16 +7572,21 @@ function renderizarCalendario() {
         const categorias = categoriasDoDia(dataIso);
         const classes = ["calendario-dia"];
         if (dataIso === hojeIso) classes.push("calendario-dia-hoje");
+        if (dataIso === calendarioDiaSelecionado) classes.push("calendario-dia-selecionado");
         const pontos = categorias.size
             ? `<span class="calendario-dia-pontos">${Array.from(categorias).map(cat => `<i style="background:${CATEGORIAS_CALENDARIO[cat].cor}" title="${CATEGORIAS_CALENDARIO[cat].label}"></i>`).join("")}</span>`
             : "";
-        html += `<button class="${classes.join(" ")}" onclick="abrirModalDiaCalendario('${dataIso}')"><span class="calendario-dia-numero">${dia}</span>${pontos}</button>`;
+        html += `<button class="${classes.join(" ")}" onclick="selecionarDiaCalendario('${dataIso}')"><span class="calendario-dia-numero">${dia}</span>${pontos}</button>`;
     }
     document.getElementById("calendario-grade").innerHTML = html;
 }
 
-function abrirModalDiaCalendario(dataIso) {
-    calendarioDiaModalAberto = dataIso;
+// NOVO: antes era abrirModalDiaCalendario (abria um modal) — agora só atualiza o painel inline que já
+// fica visível o tempo todo abaixo do calendário (ver #calendario-painel-dia, index.html). Continua
+// chamada ao clicar num dia da grade, mas isso agora é opcional: o painel já mostra hoje sozinho (ver
+// inicializarCalendario).
+function selecionarDiaCalendario(dataIso) {
+    calendarioDiaSelecionado = dataIso;
     const d = new Date(dataIso + "T00:00:00");
     document.getElementById("calendario-dia-titulo").innerText = `${NOMES_DIAS_SEMANA_CALENDARIO[d.getDay()]}, ${d.getDate()} de ${NOMES_MESES_CALENDARIO[d.getMonth()].toLowerCase()}`;
 
@@ -7588,7 +7597,11 @@ function abrirModalDiaCalendario(dataIso) {
 
     renderizarListaLembretes(dataIso);
     document.getElementById("input-novo-lembrete").value = "";
-    document.getElementById("calendario-dia-modal").classList.remove("modal-oculto");
+    // Realça o dia selecionado na grade (ver renderizarCalendario) -- só precisa atualizar as classes
+    // dos botões já existentes, sem reconstruir a grade inteira.
+    document.querySelectorAll(".calendario-dia.calendario-dia-selecionado").forEach(el => el.classList.remove("calendario-dia-selecionado"));
+    const botaoDoDia = Array.from(document.querySelectorAll(".calendario-dia")).find(el => el.getAttribute("onclick") === `selecionarDiaCalendario('${dataIso}')`);
+    if (botaoDoDia) botaoDoDia.classList.add("calendario-dia-selecionado");
 }
 
 function renderizarListaLembretes(dataIso) {
@@ -7601,12 +7614,12 @@ function renderizarListaLembretes(dataIso) {
 function adicionarLembrete() {
     const input = document.getElementById("input-novo-lembrete");
     const texto = input.value.trim();
-    if (!texto || !calendarioDiaModalAberto) return;
-    if (!dados.lembretes[calendarioDiaModalAberto]) dados.lembretes[calendarioDiaModalAberto] = [];
-    dados.lembretes[calendarioDiaModalAberto].push({ id: Date.now(), texto: texto });
+    if (!texto || !calendarioDiaSelecionado) return;
+    if (!dados.lembretes[calendarioDiaSelecionado]) dados.lembretes[calendarioDiaSelecionado] = [];
+    dados.lembretes[calendarioDiaSelecionado].push({ id: Date.now(), texto: texto });
     salvar();
     input.value = "";
-    renderizarListaLembretes(calendarioDiaModalAberto);
+    renderizarListaLembretes(calendarioDiaSelecionado);
     renderizarCalendario(); // atualiza o marcador de "tem evento" na grade
 }
 
@@ -7616,11 +7629,6 @@ function removerLembrete(dataIso, id) {
     salvar();
     renderizarListaLembretes(dataIso);
     renderizarCalendario();
-}
-
-function fecharModalDiaCalendario() {
-    calendarioDiaModalAberto = null;
-    document.getElementById("calendario-dia-modal").classList.add("modal-oculto");
 }
 
 // NOVO: hidrata dados.srsItems a partir do IndexedDB ANTES da primeira atualizar() — o resto do app
