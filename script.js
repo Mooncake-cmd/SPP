@@ -323,7 +323,28 @@ function verificarGameOver() { if (dados.hp <= 0) document.getElementById("gameo
 let resetDiarioEGameOverJaRodaram = false;
 function rodarResetDiarioEGameOverUmaVez() {
     if (resetDiarioEGameOverJaRodaram) return;
+    // NOVO: se existe uma conexão com o Drive em andamento AGORA (automática no carregamento OU o
+    // usuário clicando manualmente em "Conectar Google Drive" — ver conectarGoogleDrive/
+    // promiseConexaoDriveEmAndamento, seção de sincronização com o Drive), espera ela terminar antes
+    // de processar dano/game over. Reconfere isso bem aqui, no momento real de executar — não só uma
+    // vez lá no carregamento (ver aguardarChecagemInicialDoDrive) — porque o usuário pode clicar em
+    // "Conectar" DEPOIS do teto inicial de 5s já ter liberado essa função pra rodar; sem essa
+    // reconferência, um aparelho pouco usado processava o dano/game over em cima de dados
+    // desatualizados enquanto a conexão de verdade ainda estava em andamento em paralelo — bug real
+    // que já causou perda de sincronização (ver dadosLocaisNaoComparadosComDrive pra a 2ª camada de
+    // proteção, pro caso da conexão demorar mais que o teto e mesmo assim precisar ficar segura).
+    if (promiseConexaoDriveEmAndamento) { promiseConexaoDriveEmAndamento.then(rodarResetDiarioEGameOverUmaVez); return; }
+    // Um conflito pode ter aparecido durante a espera acima (a própria sincronização que acabou de
+    // terminar pode ser a causa) — deixa o usuário decidir primeiro (banner já visível).
+    if (dadosRemotosPendentesConflito) return;
     resetDiarioEGameOverJaRodaram = true;
+    // NOVO: se essa execução está rodando SEM uma comparação de verdade já confirmada com o Drive
+    // nessa sessão (ex: o teto de espera acima estourou, ou o Drive nem tentou conectar ainda), o
+    // timestamp que salvar() vai carimbar em resetDiario()/verificarGameOver() não é confiável pra
+    // decidir sozinho quem "ganha" numa sincronização futura — marca isso ANTES de processar, pra
+    // sincronizarComDrive() (seção de Drive) saber que precisa mostrar o aviso de conflito da próxima
+    // vez que conectar, mesmo que o timestamp local pareça mais novo por coincidência de horário.
+    if (!sincronizacaoDriveConfirmadaNestaSessao) dadosLocaisNaoComparadosComDrive = true;
     resetDiario();
     verificarGameOver();
     atualizar();
@@ -6929,6 +6950,11 @@ const SYNC_DRIVE_POLL_INTERVAL_MS = 120000; // a cada 2 minutos
 // NOVO: prazo máximo que o carregamento da página espera o Drive responder antes de rodar
 // resetDiario()/verificarGameOver() — ver aguardarChecagemInicialDoDrive.
 const ESPERA_MAXIMA_CHECAGEM_DRIVE_INICIAL_MS = 5000;
+// NOVO: teto pra uma tentativa de conexão INTERATIVA (usuário clicando "Conectar Google Drive", ou
+// uma reconexão silenciosa que precisou de UI própria do navegador/FedCM) — bem maior que o teto
+// acima de propósito: dar tempo real pra alguém ver a tela, escolher a conta, etc. Ver
+// promiseConexaoDriveEmAndamento/conectarGoogleDrive.
+const ESPERA_MAXIMA_CONEXAO_INTERATIVA_DRIVE_MS = 90000;
 
 let googleTokenClient = null;
 let googleAccessToken = null;
@@ -6938,6 +6964,26 @@ let driveUltimaSincronizacaoEm = null;
 let driveSincronizando = false;
 let syncDrivePendente = null;
 let dadosRemotosPendentesConflito = null;
+// NOVO: promise da tentativa de conexão com o Drive em andamento AGORA (automática ou manual — ver
+// conectarGoogleDrive) — null quando nenhuma está rolando. rodarResetDiarioEGameOverUmaVez espera por
+// ela antes de processar dano/game over, pra nunca competir de verdade com uma conexão real em
+// andamento (bug encontrado num uso real: o celular processava game over em cima de dados
+// desatualizados ANTES da conexão manual terminar, e o timestamp "agora" carimbado nesse meio-tempo
+// sobrescrevia em silêncio o progresso real de outro aparelho no Drive).
+let promiseConexaoDriveEmAndamento = null;
+let resolverConexaoDriveEmAndamento = null;
+// NOVO: fica true assim que sincronizarComDrive() completa uma comparação de verdade com o Drive
+// nessa sessão (baixou o remoto e decidiu quem ganha, ou confirmou que não existe nada lá ainda) —
+// usado por rodarResetDiarioEGameOverUmaVez pra saber se pode confiar no timestamp que vai carimbar.
+let sincronizacaoDriveConfirmadaNestaSessao = false;
+// NOVO: 2ª camada de proteção (além da espera acima) — fica true quando resetDiario()/
+// verificarGameOver() rodam SEM uma comparação confirmada com o Drive nessa sessão (ex: o teto de
+// espera estourou, ou o Drive nem tentou conectar ainda nesse momento). Enquanto estiver true,
+// sincronizarComDrive() SEMPRE mostra o aviso de conflito na próxima vez que conectar (mesmo que o
+// timestamp local pareça mais novo por coincidência de horário) — só assim dá pra garantir que
+// conectar o Drive DEPOIS do teto estourar ainda oferece a chance de puxar a versão de outro
+// aparelho, em vez de sobrescrever o Drive em silêncio, que é exatamente o bug que já aconteceu.
+let dadosLocaisNaoComparadosComDrive = false;
 
 // Identifica de qual aparelho veio a última mudança (só informativo por enquanto, guardado no próprio
 // payload sincronizado) — não é PII, é só um UUID aleatório sem ligação com o usuário.
@@ -6957,12 +7003,23 @@ function inicializarGoogleTokenClient() {
         client_id: GOOGLE_CLIENT_ID,
         scope: GOOGLE_DRIVE_SCOPE,
         callback: resposta => {
-            if (resposta.error) { onFalhaConexaoDrive(resposta); return; }
+            // NOVO: libera quem estiver esperando essa tentativa de conexão terminar (ver
+            // promiseConexaoDriveEmAndamento/conectarGoogleDrive) — nos dois desfechos, sucesso ou
+            // falha. No sucesso, só depois que sincronizarComDrive() terminar de verdade (baixou/
+            // comparou/decidiu), não só quando o token chega — é a comparação em si que
+            // rodarResetDiarioEGameOverUmaVez precisa esperar, não a autenticação.
+            if (resposta.error) {
+                onFalhaConexaoDrive(resposta);
+                if (resolverConexaoDriveEmAndamento) { resolverConexaoDriveEmAndamento(); resolverConexaoDriveEmAndamento = null; }
+                return;
+            }
             googleAccessToken = resposta.access_token;
             driveConectado = true;
             localStorage.setItem("spp_drive_auto_conectar", "1");
             atualizarUiSincronizacaoDrive();
-            sincronizarComDrive();
+            sincronizarComDrive().finally(() => {
+                if (resolverConexaoDriveEmAndamento) { resolverConexaoDriveEmAndamento(); resolverConexaoDriveEmAndamento = null; }
+            });
         }
     });
     return true;
@@ -6981,9 +7038,31 @@ function onFalhaConexaoDrive(resposta) {
 function conectarGoogleDrive(silencioso) {
     if (!inicializarGoogleTokenClient()) {
         if (!silencioso) alert("Não foi possível carregar o login do Google. Verifique sua conexão e tente de novo.");
-        return;
+        return Promise.resolve();
     }
+    // NOVO: expõe a promise DESSA tentativa (ver promiseConexaoDriveEmAndamento) pra quem precisar
+    // esperar ela terminar antes de processar dano/game over (ver rodarResetDiarioEGameOverUmaVez) —
+    // com um teto pra nunca travar o app esperando pra sempre uma conexão que não termina. Silenciosa
+    // (reconexão automática no carregamento) usa o mesmo teto curto de sempre
+    // (ESPERA_MAXIMA_CHECAGEM_DRIVE_INICIAL_MS) — uma tentativa silenciosa travada (ex: rede caiu no
+    // meio de uma checagem que já tinha token) não é motivo pra fazer o usuário esperar o teto
+    // interativo inteiro. Só a interativa (clique manual em "Conectar", tela de escolher conta) ganha
+    // o teto bem maior (ESPERA_MAXIMA_CONEXAO_INTERATIVA_DRIVE_MS) — é ela que precisa de tempo real
+    // de reação humana. O setTimeout chama "resolve" direto (capturado por essa promise específica),
+    // nunca a variável de módulo resolverConexaoDriveEmAndamento — essa pode ser zerada (ver
+    // inicializarGoogleTokenClient) antes do teto estourar, e resolve() é seguro chamar mais de 1 vez
+    // (Promise já ignora chamadas repetidas).
+    let resolverDessaTentativa;
+    const promessaDessaTentativa = new Promise(resolve => { resolverDessaTentativa = resolve; });
+    resolverConexaoDriveEmAndamento = resolverDessaTentativa;
+    promiseConexaoDriveEmAndamento = promessaDessaTentativa;
+    setTimeout(resolverDessaTentativa, silencioso ? ESPERA_MAXIMA_CHECAGEM_DRIVE_INICIAL_MS : ESPERA_MAXIMA_CONEXAO_INTERATIVA_DRIVE_MS);
+    promessaDessaTentativa.finally(() => {
+        if (promiseConexaoDriveEmAndamento === promessaDessaTentativa) promiseConexaoDriveEmAndamento = null;
+        if (resolverConexaoDriveEmAndamento === resolverDessaTentativa) resolverConexaoDriveEmAndamento = null;
+    });
     googleTokenClient.requestAccessToken({ prompt: silencioso ? "" : "consent" });
+    return promessaDessaTentativa;
 }
 
 function desconectarGoogleDrive() {
@@ -7138,11 +7217,28 @@ function sincronizarComDrive() {
     if (!driveConectado || !googleAccessToken || driveSincronizando) return Promise.resolve();
     driveSincronizando = true;
     return buscarArquivoSyncDrive().then(fileId => {
-        if (!fileId) return enviarParaDrive(null, dados);
+        if (!fileId) {
+            // Nada no Drive ainda pra esse usuário — nenhum risco de sobrescrever progresso de outro
+            // aparelho, então essa "comparação" já conta como confirmada de verdade.
+            sincronizacaoDriveConfirmadaNestaSessao = true;
+            dadosLocaisNaoComparadosComDrive = false;
+            return enviarParaDrive(null, dados);
+        }
         return baixarConteudoDrive(fileId).then(remoto => {
             const timestampRemoto = (remoto && remoto._syncMeta && remoto._syncMeta.ultimaModificacaoEm) || 0;
             const timestampLocal = (dados._syncMeta && dados._syncMeta.ultimaModificacaoEm) || 0;
-            if (timestampRemoto > timestampLocal) { avisarConflitoSincronizacaoDrive(remoto); return; }
+            // NOVO: se os dados locais rodaram resetDiario()/verificarGameOver() SEM uma comparação já
+            // confirmada com o Drive nessa sessão (ver dadosLocaisNaoComparadosComDrive/
+            // rodarResetDiarioEGameOverUmaVez), o timestamp local não é confiável — mesmo que ele
+            // pareça mais novo só por coincidência de horário (foi carimbado "agora" durante o
+            // processamento), sempre mostra o aviso de conflito em vez de decidir sozinho. É o que
+            // garante que conectar o Drive DEPOIS do teto de espera estourar ainda oferece a chance de
+            // puxar a versão de outro aparelho, em vez de sobrescrever o Drive em silêncio.
+            if (timestampRemoto > timestampLocal || dadosLocaisNaoComparadosComDrive) {
+                avisarConflitoSincronizacaoDrive(remoto);
+                return;
+            }
+            sincronizacaoDriveConfirmadaNestaSessao = true;
             return enviarParaDrive(fileId, dados);
         });
     }).then(() => {
@@ -7191,6 +7287,12 @@ function usarVersaoRemotaDrive() {
 }
 function manterVersaoLocalDrive() {
     dadosRemotosPendentesConflito = null;
+    // NOVO: o usuário acabou de revisar e confirmar DE PROPÓSITO que quer ficar com a versão local —
+    // isso resolve a incerteza que dadosLocaisNaoComparadosComDrive existia pra sinalizar (ver
+    // sincronizarComDrive/rodarResetDiarioEGameOverUmaVez), então já pode confiar no timestamp local
+    // dali em diante nessa sessão.
+    sincronizacaoDriveConfirmadaNestaSessao = true;
+    dadosLocaisNaoComparadosComDrive = false;
     const banner = document.getElementById("drive-conflito-banner");
     if (banner) banner.classList.add("oculto");
     // a versão local "ganha" a partir de agora -- sobrescreve a que estava no Drive com a de cá
