@@ -2783,7 +2783,15 @@ const PROPRIEDADES_CSS_ANKI_PERMITIDAS = new Set([
     // pseudo-tabelas com <div style="display:grid; grid-template-columns:..."> em vez de <table> de
     // verdade (já permitido); sem essas propriedades, as "linhas" viravam blocos empilhados sem
     // nenhuma coluna, perdendo a estrutura de tabela inteira.
-    "background", "display", "grid-template-columns", "grid-column", "gap", "align-items", "justify-content"
+    "background", "display", "grid-template-columns", "grid-column", "gap", "align-items", "justify-content",
+    // NOVO: "transform" — decks de tarot/cartas costumam usar a MESMA imagem pra carta normal e
+    // invertida, diferenciando só com "style: transform:rotate(180deg)" no <img>. Sem isso, a carta
+    // invertida (metade do deck TAROT RIDER-WAITE PT-BR, por ex.) renderizava idêntica à normal,
+    // perdendo o único sinal visual entre as duas leituras. Mesmo raciocínio de segurança de sempre:
+    // o filtro de url()/expression()/javascript:/@import acima cobre qualquer valor de "transform"
+    // também (funções como rotate()/scale()/translate() não carregam recurso externo nem executam
+    // código).
+    "transform"
 ]);
 
 // Faixas de sanidade pra font-size (evita que um .apkg hostil estoure o layout do card com um valor
