@@ -1085,6 +1085,42 @@ button:hover { filter: brightness(0.9); }
     padding: 4px 8px;
 }
 
+/* NOVO: Image Occlusion Enhanced (ver montarLadoImageOcclusion/ehModeloImageOcclusionEnhanced,
+   script.js) — empilha a máscara (Question Mask na pergunta, Answer Mask na resposta) EXATAMENTE em
+   cima da imagem base, reproduzindo o #io-overlay/#io-original/#io-wrapper do CSS original do Anki,
+   só que com classes/regras NOSSAS (não vindas do deck — ver comentário em
+   PROPRIEDADES_CSS_ANKI_PERMITIDAS sobre por que position/z-index não são liberados genericamente pra
+   qualquer campo importado). width:100% (não só max-width) nas duas imagens garante que escalem
+   igual e fiquem alinhadas pixel a pixel — essa regra vem DEPOIS de ".srs-campo-caixa img" acima de
+   propósito, pra vencer no empate de especificidade CSS. */
+.srs-io-wrapper {
+    position: relative;
+    width: 100%;
+}
+.srs-io-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    z-index: 3;
+}
+.srs-io-original {
+    position: relative;
+    width: 100%;
+    z-index: 1;
+}
+.srs-io-overlay img, .srs-io-original img {
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    display: block;
+}
+.srs-io-header, .srs-io-footer {
+    text-align: center;
+    margin: 4px 0;
+    font-size: 0.9em;
+}
+
 /* NOVO: interface de múltipla escolha auto-detectada (ver detectarCamposOpcaoMultiplaEscolha /
    renderizarOpcoesMultiplaEscolhaSRS) — reproduz a experiência de clicar numa alternativa e ver
    feedback na hora, sem executar nenhum script do deck original. */

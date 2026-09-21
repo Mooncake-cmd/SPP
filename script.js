@@ -2362,6 +2362,11 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
         if (modelosJaChecados.has(modelo.id)) return;
         modelosJaChecados.add(modelo.id);
         const nomeModelo = modelo.name || "sem nome";
+        // NOVO: Image Occlusion Enhanced (ver ehModeloImageOcclusionEnhanced) já tem suporte dedicado
+        // — não mostra mais esse aviso. O regex por nome continua só pra pegar outras variantes SEM
+        // essa estrutura de campos (ex: o Image Occlusion NATIVO do Anki 2.1.54+, mecanismo totalmente
+        // diferente — cloze com máscara SVG num único campo "Occlusion" — fora de escopo por enquanto).
+        if (ehModeloImageOcclusionEnhanced(modelo)) return;
         if (/image\s*occlusion/i.test(nomeModelo)) {
             adicionarAvisoFidelidadeApkg(resumo, `Modelo "${nomeModelo}" é do tipo Image Occlusion (ocultar partes de uma imagem) — não tem suporte dedicado; o card pode não aparecer como no Anki.`);
             return; // já é um caso especial conhecido, não precisa checar os filtros de template abaixo
@@ -3167,8 +3172,38 @@ function detectarCamposOpcaoMultiplaEscolha(nomesCampos) {
     return encontrados.map(e => e.nome);
 }
 
+// NOVO: detecta o note type do add-on "Image Occlusion Enhanced" (o mais usado em decks de
+// anatomia/diagramas — ex. "Image_Occlusion_ThoraxAbdomenPelvis") pela CONVENÇÃO DE NOME DE CAMPO do
+// próprio add-on (estável há anos), não pelo nome do modelo (que o usuário pode renomear). Detecção
+// estrutural, não pega o Image Occlusion NATIVO do Anki 2.1.54+ (que é outro mecanismo inteiro —
+// type:1/cloze com máscara SVG dentro de um único campo "Occlusion", renderizado por JS do próprio
+// Anki, nunca com campos "Question Mask"/"Answer Mask" separados) — esse fica fora de escopo.
+function ehModeloImageOcclusionEnhanced(modelo) {
+    const nomes = (modelo.flds || []).map(f => f.name);
+    return nomes.includes("Image") && nomes.includes("Question Mask") && nomes.includes("Answer Mask");
+}
+
+// Monta um lado (frente ou verso) de um card de Image Occlusion Enhanced empilhando a máscara
+// (Question Mask na frente, Answer Mask no verso) EXATAMENTE em cima da imagem base — é assim que o
+// Anki de verdade exibe esse note type (ver CSS #io-overlay/#io-original/#io-wrapper do template
+// original), só que aqui com classes/CSS NOSSOS (.srs-io-*, em style.css), não o CSS/posicionamento
+// do deck. Motivo de não tentar interpretar o CSS original: ele usa seletores de ID (que
+// extrairEstilosDeClassesAnki não lê — só entende .classe{...}) e position/z-index (que não estão em
+// PROPRIEDADES_CSS_ANKI_PERMITIDAS de propósito — liberar isso pra QUALQUER campo de QUALQUER deck
+// deixaria um deck malicioso/bagunçado cobrir outras partes da tela do site, não só a área do card).
+function montarLadoImageOcclusion(campos, nomeMascara) {
+    const html = nome => (campos[nome] && campos[nome].rico.html) || "";
+    const header = html("Header"), footer = html("Footer");
+    return (header ? `<div class="srs-io-header">${header}</div>` : "")
+        + `<div class="srs-io-wrapper"><div class="srs-io-overlay">${html(nomeMascara)}</div><div class="srs-io-original">${html("Image")}</div></div>`
+        + (footer ? `<div class="srs-io-footer">${footer}</div>` : "");
+}
+
 function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaIndice) {
     const nomesCampos = (modelo.flds || []).map(f => f.name);
+    // NOVO: calculado aqui em cima (só depende do MODELO, não da nota) porque já é usado logo abaixo,
+    // na hora de decidir o que entra em imagensFrente/imagensVerso — ver comentário lá.
+    const ehImageOcclusion = ehModeloImageOcclusionEnhanced(modelo);
     // Extrai mídia/texto de CADA CAMPO isoladamente primeiro (exatamente como já fazíamos pra decks
     // "simples") — só depois eles entram no template. Assim, mídia de verdade (a que vem de um campo
     // da nota) nunca se confunde com mídia "de cano" do próprio template, que já foi removida em
@@ -3209,9 +3244,25 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         const imagensFrente = [], midiasFrente = [], imagensVerso = [], midiasVerso = [];
         let midiaNaoSuportada = false;
         let frenteTemConteudoRico = false, versoTemConteudoRico = false;
+        // NOVO: campos EXCLUSIVOS do wrapper de Image Occlusion Enhanced (ver montarLadoImageOcclusion)
+        // — nomeados aqui pra não entrar em imagensFrente/imagensVerso, que alimentam o mecanismo
+        // GENÉRICO de "imagem da pergunta/resposta" (aplicarMidiasExtraidasNoCard/
+        // exibirImagensRevisaoAtual, uma exibição separada, ANTES do card em si). Sem essa exclusão, a
+        // imagem base ("Image") aparecia ali TAMBÉM, sem máscara nenhuma por cima — vazando a resposta
+        // (a imagem já rotulada) acima do wrapper corretamente sobreposto, mesmo com o resto certo.
+        // Continua contando pra frenteTemConteudoRico/versoTemConteudoRico normalmente (senão o card
+        // seria rejeitado como "frente vazia", já que nesse deck Header/Footer costumam vir em branco).
+        const CAMPOS_EXCLUSIVOS_IMAGE_OCCLUSION = new Set(["Image", "Question Mask", "Answer Mask"]);
         resultadosPorCampo.forEach(r => {
-            if (camposFrenteNota.has(r.nome)) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); if (r.rico.temConteudo) frenteTemConteudoRico = true; }
-            if (camposVersoNota.has(r.nome)) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); if (r.rico.temConteudo) versoTemConteudoRico = true; }
+            const contaComoImagemAvulsa = !ehImageOcclusion || !CAMPOS_EXCLUSIVOS_IMAGE_OCCLUSION.has(r.nome);
+            if (camposFrenteNota.has(r.nome)) {
+                if (contaComoImagemAvulsa) { imagensFrente.push(...r.imagens); midiasFrente.push(...r.midias); }
+                if (r.rico.temConteudo) frenteTemConteudoRico = true;
+            }
+            if (camposVersoNota.has(r.nome)) {
+                if (contaComoImagemAvulsa) { imagensVerso.push(...r.imagens); midiasVerso.push(...r.midias); }
+                if (r.rico.temConteudo) versoTemConteudoRico = true;
+            }
             // NOVO: só conta como "mídia não suportada" de verdade quando os DOIS pipelines falham em
             // resolver — o antigo (extrairMidiaDoCampo, ainda usado pro texto achatado/compatibilidade)
             // e o novo (extrairCampoAnkiComoHtml, o que realmente aparece na tela). Ex: imagem
@@ -3276,9 +3327,17 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
                 .filter(c => c.campo && c.campo.rico.temConteudo)
                 .map(c => ({ nome: c.nome, html: c.campo.rico.html, correta: nomesOpcoesCorretas.includes(c.nome) }));
         }
+        // NOVO: Image Occlusion Enhanced (ver ehModeloImageOcclusionEnhanced/montarLadoImageOcclusion,
+        // ehImageOcclusion calculado no topo da função) — Image/Question Mask/Answer Mask/Header/Footer
+        // já vão embutidos no wrapper posicionado abaixo, então saem das caixas genéricas pra não
+        // duplicar (mesmo padrão da múltipla escolha acima). Remarks/Sources/Extra 1/Extra 2 continuam
+        // pelas caixas genéricas normalmente.
+
         // Campos de opção já viram a interface especial acima — excluídos das caixas genéricas pra não
         // duplicar (uma vez como opção clicável, outra vez como caixa solta).
-        const camposParaExcluirDasCaixas = ehMultiplaEscolha ? new Set(camposOpcao) : new Set();
+        const camposParaExcluirDasCaixas = ehMultiplaEscolha ? new Set(camposOpcao)
+            : ehImageOcclusion ? new Set(["Image", "Question Mask", "Answer Mask", "Header", "Footer"])
+            : new Set();
 
         const camposFrenteRicos = ordemDosCamposNoTemplate(qfmtResolvido, nomesCampos)
             .filter(c => !camposParaExcluirDasCaixas.has(c.nome))
@@ -3300,7 +3359,17 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         // campo. Pulamos isso pra múltipla escolha de propósito: substituir só o campo da opção (sem
         // mexer no texto ao redor) deixaria um rótulo tipo "GABARITO: " sobrando sem valor nenhum
         // depois, pior do que a caixa sintetizada que já temos.
-        if (!ehMultiplaEscolha) {
+        //
+        // Image Occlusion Enhanced é outro caso à parte: o esqueleto genérico do template (usado no
+        // ramo abaixo) preserva a estrutura de <div>s do qfmt/afmt, mas NUNCA o posicionamento
+        // (position/z-index do CSS original, que usa seletores de ID — fora do que
+        // extrairEstilosDeClassesAnki lê) — sem isso a máscara e a imagem apareciam uma embaixo da
+        // outra, não sobrepostas, e a imagem base (já rotulada) ficava sempre 100% visível mesmo na
+        // pergunta. Ver montarLadoImageOcclusion/.srs-io-* (style.css) pro empilhamento correto.
+        if (ehImageOcclusion) {
+            card.frenteTemplateHtml = montarLadoImageOcclusion(campos, "Question Mask");
+            card.versoTemplateHtml = montarLadoImageOcclusion(campos, "Answer Mask");
+        } else if (!ehMultiplaEscolha) {
             const hintsFrenteRico = [], hintsVersoRico = [];
             const qfmtEsqueletoResolvido = resolverSecoesCondicionaisAnki(prep.qfmtEsqueleto, campos);
             const afmtEsqueletoResolvido = resolverSecoesCondicionaisAnki(prep.afmtEsqueleto, campos);
