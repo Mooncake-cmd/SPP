@@ -2406,13 +2406,26 @@ function processarBancoAnki(db, zip, nomeParaIndice, resumo) {
                     delete card._versoVazio;
                     // NOVO: reimportar um .apkg já importado antes (pra pegar uma correção nova) não deve
                     // duplicar os cards que já tinham entrado certo — ver assinaturaCardSRS/
-                    // assinaturasJaImportadas acima.
-                    const assinatura = assinaturaCardSRS(card.tema, card.subtema, card.resposta);
-                    if (assinaturasJaImportadas.has(assinatura)) {
-                        resumo.duplicadosPulados = (resumo.duplicadosPulados || 0) + 1;
-                        return;
+                    // assinaturasJaImportadas acima. SÓ checa quando a pergunta (subtema) tem algum texto
+                    // de verdade — cards cuja frente é só imagem, sem nenhum texto que distinga um do
+                    // outro (ex: notas de Image Occlusion, onde cabeçalho/rodapé/observações costumam vir
+                    // todos em branco e a única coisa que muda de fato é a imagem em si) NUNCA entram
+                    // nessa checagem. Motivo: os ids de mídia (data-srs-img-id/data-srs-midia-id) são
+                    // gerados de novo, ALEATORIAMENTE, a cada importação (ver extrairCampoAnkiComoHtml) —
+                    // não dá pra usá-los pra reconhecer "é o mesmo card de uma importação anterior". Sem
+                    // nenhum texto sobrando pra comparar, todo card assim cairia na MESMA assinatura vazia
+                    // e pareceria duplicata de qualquer outro — bug real encontrado num deck real: 45 de
+                    // 46 notas de Image Occlusion (imagens diferentes entre si) foram descartadas como
+                    // "duplicata" da 1ª, só por coincidirem em tema+pergunta-vazia+resposta genérica.
+                    const temTextoDistintivo = (card.subtema || "").trim() !== "";
+                    if (temTextoDistintivo) {
+                        const assinatura = assinaturaCardSRS(card.tema, card.subtema, card.resposta);
+                        if (assinaturasJaImportadas.has(assinatura)) {
+                            resumo.duplicadosPulados = (resumo.duplicadosPulados || 0) + 1;
+                            return;
+                        }
+                        assinaturasJaImportadas.add(assinatura);
                     }
-                    assinaturasJaImportadas.add(assinatura);
                     if (midiaNaoSuportadaCard) resumo.midiaNaoSuportada++;
                     if (versoVazioCard) resumo.versoVazio = (resumo.versoVazio || 0) + 1;
                     dados.srsItems.push(card);
@@ -2463,12 +2476,15 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
     if (ehCloze) {
         // NOVO: antes sempre lia o cloze do campo 0 — quebra em decks onde o campo 0 é metadado (ex:
         // "MATÉRIA"/matéria+logo) e o texto com {{c1::...}} de verdade está em outro campo. Agora lemos
-        // do template (qfmt tem {{cloze:NomeDoCampo}}) qual campo é o de verdade; se não achar, cai no
-        // campo 0 como antes (decks onde isso já era o campo certo continuam funcionando igual).
-        const nomeCampoCloze = encontrarNomeCampoClozeAnki(modelo);
+        // do template (qfmt tem {{cloze:NomeDoCampo}}) quais campos são os de verdade — normalmente só
+        // 1, mas o add-on "Cloze Overlapper" espalha os números por campos SEPARADOS (Text1 só tem
+        // {{c1::...}}, Text2 só {{c2::...}}, etc., referenciados juntos no mesmo qfmt como
+        // {{cloze:Text1}} {{cloze:Text2}} ...) — ver encontrarNomesCamposClozeAnki. Se não achar nenhum,
+        // cai no campo 0 como antes (decks onde isso já era o campo certo continuam funcionando igual).
+        const nomesCamposCloze = encontrarNomesCamposClozeAnki(modelo);
         const nomesCampos = (modelo.flds || []).map(f => f.name);
-        const idx = nomeCampoCloze ? nomesCampos.indexOf(nomeCampoCloze) : -1;
-        return converterNotaClozeAnki(modelo, flds, idx !== -1 ? idx : 0, tema, zip, nomeParaIndice);
+        const idxs = nomesCamposCloze.map(nome => nomesCampos.indexOf(nome)).filter(i => i !== -1);
+        return converterNotaClozeAnki(modelo, flds, idxs.length > 0 ? idxs : [0], tema, zip, nomeParaIndice);
     }
 
     // NOVO: um tipo de nota pode ter MAIS DE UM TEMPLATE (ord 0, 1, 2...) — no Anki de verdade, cada
@@ -2509,14 +2525,21 @@ function converterNotaAnki(modelo, flds, tema, zip, nomeParaIndice) {
     return converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaIndice).then(card => [card]);
 }
 
-function encontrarNomeCampoClozeAnki(modelo) {
+// Retorna TODOS os nomes de campo referenciados como {{cloze:NomeDoCampo}} no qfmt (na ordem em que
+// aparecem, sem repetir) — normalmente só 1, mas ver comentário em converterNotaAnki sobre o add-on
+// Cloze Overlapper, que referencia vários campos cloze juntos no mesmo template.
+function encontrarNomesCamposClozeAnki(modelo) {
     const tmpl = modelo.tmpls && modelo.tmpls[0];
-    if (!tmpl || !tmpl.qfmt) return null;
-    const m = tmpl.qfmt.match(/\{\{cloze:([^}]+)\}\}/);
-    if (!m) return null;
-    const nome = m[1].trim();
+    if (!tmpl || !tmpl.qfmt) return [];
     const nomesCampos = (modelo.flds || []).map(f => f.name);
-    return nomesCampos.includes(nome) ? nome : null;
+    const encontrados = [];
+    const regex = /\{\{cloze:([^}]+)\}\}/g;
+    let m;
+    while ((m = regex.exec(tmpl.qfmt)) !== null) {
+        const nome = m[1].trim();
+        if (nomesCampos.includes(nome) && !encontrados.includes(nome)) encontrados.push(nome);
+    }
+    return encontrados;
 }
 
 // Tira do template tudo que não é conteúdo de verdade do card: o JS/CSS embutido (alguns add-ons,
@@ -3326,34 +3349,44 @@ function converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaInd
     });
 }
 
-function converterNotaClozeAnki(modelo, flds, idxCampoCloze, tema, zip, nomeParaIndice) {
-    const campoTexto = flds[idxCampoCloze] || "";
-    return extrairMidiaDoCampo(campoTexto, zip, nomeParaIndice).then(processado => {
-        const semNada = !processado.texto.trim() && processado.imagens.length === 0 && processado.midias.length === 0;
-        if (semNada) throw new Error(`Nota cloze sem nenhum conteúdo. Campo original: "${campoTexto.slice(0, 60)}"`);
-        const segmentos = parsearClozeAnki(processado.texto);
-        // NOVO: uma nota cloze pode ter mais de um NÚMERO de lacuna distinto no mesmo campo (ex:
-        // "카페{{c1::에}} 가요. 카페{{c2::에서}} 공부해요."). No Anki de verdade isso gera 1 CARD POR
-        // NÚMERO — o card do c1 esconde só "에" (mostrando "에서" revelado normalmente), o card do c2 faz
-        // o oposto. Antes, todo {{cN::...}} virava lacuna dentro de UM card só, escondendo os dois ao
-        // mesmo tempo e nunca gerando o 2º card — uma tela que o Anki nunca mostraria, e menos cards
-        // importados do que o deck realmente tem.
+// idxsCamposCloze: lista de índices de campo (normalmente só 1 — ver encontrarNomesCamposClozeAnki).
+// Um add-on conhecido, "Cloze Overlapper", espalha os números de lacuna por campos SEPARADOS (Text1 só
+// tem {{c1::...}}, Text2 só {{c2::...}}, etc., referenciados juntos no mesmo qfmt/afmt) — tratando só o
+// 1º campo, os números dos outros nunca eram vistos e boa parte dos cards reais da nota nunca era
+// gerada. Processa cada campo cloze separadamente e junta os segmentos resultantes (na ordem dos
+// campos, com um espaço entre um campo e outro pra não grudar palavras) antes de aplicar a mesma lógica
+// de "1 card por número distinto" de sempre — o resto da função não muda.
+function converterNotaClozeAnki(modelo, flds, idxsCamposCloze, tema, zip, nomeParaIndice) {
+    return Promise.all(idxsCamposCloze.map(idx => extrairMidiaDoCampo(flds[idx] || "", zip, nomeParaIndice))).then(processados => {
+        const campoTextoOriginal = flds[idxsCamposCloze[0]] || "";
+        const semNada = processados.every(p => !p.texto.trim() && p.imagens.length === 0 && p.midias.length === 0);
+        if (semNada) throw new Error(`Nota cloze sem nenhum conteúdo. Campo original: "${campoTextoOriginal.slice(0, 60)}"`);
+
+        let segmentos = [];
+        processados.forEach((p, i) => {
+            if (i > 0) segmentos.push({ texto: " ", lacuna: false });
+            segmentos = segmentos.concat(parsearClozeAnki(p.texto));
+        });
+        // NOVO: uma nota cloze pode ter mais de um NÚMERO de lacuna distinto (no mesmo campo, ex:
+        // "카페{{c1::에}} 가요. 카페{{c2::에서}} 공부해요."; ou espalhado entre campos, ver comentário
+        // acima). No Anki de verdade isso gera 1 CARD POR NÚMERO — o card do c1 esconde só "에"
+        // (mostrando "에서" revelado normalmente), o card do c2 faz o oposto.
         const numeros = [...new Set(segmentos.filter(s => s.lacuna).map(s => s.numero))].sort((a, b) => Number(a) - Number(b));
-        if (numeros.length === 0) throw new Error(`Nota cloze sem nenhuma lacuna válida (esperava {{c1::...}}). Campo: "${campoTexto.slice(0, 60)}"`);
+        if (numeros.length === 0) throw new Error(`Nota cloze sem nenhuma lacuna válida (esperava {{c1::...}}). Campo: "${campoTextoOriginal.slice(0, 60)}"`);
         const subtemaExibicao = segmentos.map(s => s.texto).join("");
 
-        // NOVO: até aqui só o campo com {{c1::...}} é lido — os campos irmãos (ex: Embasamento, ✚ Dica,
-        // ✚ Saiba mais) eram inteiramente ignorados antes, mesmo quando o template do card cloze os
-        // exibia na resposta. Se o afmt do modelo for legível, descobrimos quais campos (fora o de
+        // NOVO: até aqui só os campos com {{cN::...}} são lidos — os campos irmãos (ex: Embasamento,
+        // ✚ Dica, ✚ Saiba mais) eram inteiramente ignorados antes, mesmo quando o template do card cloze
+        // os exibia na resposta. Se o afmt do modelo for legível, descobrimos quais campos (fora os de
         // cloze) aparecem nele e em que ordem, extraindo cada um como HTML rico (mesma função do
         // pipeline "com template" — ver converterNotaComTemplateAnki) pra exibir na revisão. Extraído 1x
         // só (não depende do número da lacuna) e reaproveitado em todos os cards gerados pra essa nota.
         const nomesCampos = (modelo.flds || []).map(f => f.name);
+        const nomesCamposCloze = idxsCamposCloze.map(idx => nomesCampos[idx]);
         const prep = prepararTemplateAnki(modelo);
         let promessaCamposVerso = Promise.resolve(null);
         if (prep && prep.afmt) {
-            const nomeCampoCloze = nomesCampos[idxCampoCloze];
-            const ordemVerso = ordemDosCamposNoTemplate(prep.afmt, nomesCampos).filter(c => c.nome !== nomeCampoCloze);
+            const ordemVerso = ordemDosCamposNoTemplate(prep.afmt, nomesCampos).filter(c => !nomesCamposCloze.includes(c.nome));
             if (ordemVerso.length > 0) {
                 promessaCamposVerso = Promise.all(ordemVerso.map(c => {
                     const i = nomesCampos.indexOf(c.nome);
@@ -3370,6 +3403,11 @@ function converterNotaClozeAnki(modelo, flds, idxCampoCloze, tema, zip, nomePara
             }
         }
 
+        // Mídia de TODOS os campos cloze juntos (ordem preservada), não só do 1º.
+        const imagensCombinadas = processados.flatMap(p => p.imagens);
+        const midiasCombinadas = processados.flatMap(p => p.midias);
+        const midiaNaoSuportadaCombinada = processados.some(p => p.midiaNaoSuportada);
+
         return promessaCamposVerso.then(versoExtra => numeros.map((numero, ordem) => {
             // Pra ESTE card (número "numero"): só a(s) lacuna(s) desse número ficam escondidas — as de
             // outro número (ex: c2 quando este card é o do c1) aparecem reveladas normalmente, exatamente
@@ -3383,8 +3421,8 @@ function converterNotaClozeAnki(modelo, flds, idxCampoCloze, tema, zip, nomePara
                 tema: tema, subtema: subtemaExibicao, resposta: resposta, tipo: "cloze", clozePartes: clozePartesCard,
                 data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
             };
-            aplicarMidiasExtraidasNoCard(card, "Pergunta", processado);
-            card._midiaNaoSuportada = processado.midiaNaoSuportada || !!(versoExtra && versoExtra.midiaNaoSuportada);
+            aplicarMidiasExtraidasNoCard(card, "Pergunta", { imagens: imagensCombinadas, midias: midiasCombinadas });
+            card._midiaNaoSuportada = midiaNaoSuportadaCombinada || !!(versoExtra && versoExtra.midiaNaoSuportada);
             if (versoExtra && versoExtra.camposVerso) card.camposVerso = versoExtra.camposVerso;
             return card;
         }));
