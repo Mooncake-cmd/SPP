@@ -297,6 +297,16 @@ function resetDiario() {
         dados.historicoDiario.push({ data: cursor.toLocaleDateString(), hp: dados.hp, xp: dados.pontosAcumulados });
         if (dados.historicoDiario.length > 30) dados.historicoDiario.shift();
 
+        // NOVO: o 1º dia processado aqui é o próprio dados.ultimaData — o último dia em que o app
+        // esteve de fato aberto, então item.feito ainda reflete o que o usuário realmente marcou
+        // naquele dia (correto usar como está acima). A partir do 2º dia do laço em diante, o app
+        // nunca esteve aberto — ninguém pôde marcar nada de novo — então cada item precisa voltar a
+        // contar como "não feito" pros dias seguintes. Sem isso, uma missão marcada como feita uma
+        // única vez ficava protegida de QUALQUER dano por todos os dias seguintes até o app reabrir
+        // (bug real: item feito no último dia aberto, 3 dias sem abrir o app depois, tomava 0 de dano
+        // no total, em vez dos ~220 que os dias 2 e 3 deveriam ter causado).
+        if (diasProcessados === 0) dados.itens.forEach(item => { item.feito = false; });
+
         diasProcessados++;
         if (dados.hp <= 0) break;
         cursor.setDate(cursor.getDate() + 1);
@@ -308,7 +318,8 @@ function resetDiario() {
         document.getElementById("display-dano-tomado").innerText = danoTotalGeral;
         document.getElementById("dano-modal").classList.remove("modal-oculto");
     }
-    dados.itens.forEach(item => item.feito = false);
+    // NOVO: já não é mais necessário desmarcar tudo aqui de novo — o laço acima já garante que todo
+    // item saiu com feito=false (o reset do 1º dia toca TODOS os itens, ativos ou não naquele dia).
     dados.ultimaData = hojeIso;
     salvar();
 }
@@ -349,6 +360,36 @@ function rodarResetDiarioEGameOverUmaVez() {
     verificarGameOver();
     atualizar();
 }
+
+// NOVO: sem isso, o dano/reset de virada de dia só aparecia (HP caindo, checkboxes desmarcando, o
+// modal de dano) depois que a página era recarregada manualmente — se a aba ficasse aberta passando
+// da meia-noite local, nada mudava na tela até um F5. Reagenda resetDiarioEGameOverJaRodaram = false
+// e chama a MESMA rodarResetDiarioEGameOverUmaVez() de sempre (com as mesmas proteções de
+// sincronização com o Drive já existentes) — de propósito NÃO faz location.reload(): um reload bruto
+// interromperia qualquer coisa em andamento (um campo sendo digitado sem ter sido salvo ainda, um
+// modal aberto, uma revisão de SRS em curso), enquanto chamar a lógica direto dá o mesmo resultado
+// visível (HP/checkboxes/aviso de dano atualizados) sem esse efeito colateral.
+function rodarChecagemVirouODiaSeNecessario() {
+    if (dados.ultimaData !== hojeISO()) {
+        resetDiarioEGameOverJaRodaram = false;
+        rodarResetDiarioEGameOverUmaVez();
+    }
+}
+// NOVO: dois gatilhos, porque um setTimeout sozinho não é confiável numa aba em segundo plano/
+// minimizada ou numa tela de celular bloqueada (navegadores atrasam ou pausam timers nesse estado):
+// (1) um setTimeout mirando a meia-noite local seguinte (mesmo fuso que hojeISO() já usa — ver
+// comentário lá —, então dispara na meia-noite do fuso configurado no aparelho), reagendado toda vez
+// que dispara; (2) ao a aba voltar a ficar visível, uma checagem direta comparando hojeISO() com
+// dados.ultimaData — cobre o caso do timer ter sido atrasado/pausado enquanto a aba estava escondida.
+function agendarChecagemMeiaNoite() {
+    const agora = new Date();
+    const proximaMeiaNoite = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate() + 1, 0, 0, 5); // +5s de folga
+    setTimeout(() => {
+        rodarChecagemVirouODiaSeNecessario();
+        agendarChecagemMeiaNoite();
+    }, proximaMeiaNoite - agora);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) rodarChecagemVirouODiaSeNecessario(); });
 function fecharModalDano() { document.getElementById("dano-modal").classList.add("modal-oculto"); }
 function pontosParaProximoNivel(nivel) { return Math.floor(100 * Math.pow(1.1, nivel)); }
 
@@ -7667,6 +7708,10 @@ function inicializarAppComSrsItems() {
     // (sem nenhuma edição local) e por isso nunca teria motivo pra checar sozinho — ver comentário na
     // declaração da constante.
     setInterval(() => { if (driveConectado) sincronizarComDrive(); }, SYNC_DRIVE_POLL_INTERVAL_MS);
+
+    // NOVO: agenda a checagem automática de virada de dia (ver agendarChecagemMeiaNoite) — sem ela, o
+    // dano/reset só era reprocessado no próximo carregamento manual da página.
+    agendarChecagemMeiaNoite();
 
     // NOVO: checa assim que a aba volta a ficar visível (ex: o usuário trocou de app no celular e
     // voltou) — navegadores móveis costumam pausar/atrasar setTimeout/setInterval de abas em segundo
