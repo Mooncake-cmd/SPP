@@ -7066,6 +7066,9 @@ let sincronizacaoDriveConfirmadaNestaSessao = false;
 // conectar o Drive DEPOIS do teto estourar ainda oferece a chance de puxar a versão de outro
 // aparelho, em vez de sobrescrever o Drive em silêncio, que é exatamente o bug que já aconteceu.
 let dadosLocaisNaoComparadosComDrive = false;
+// NOVO: true desde a última mudança local (ver agendarSincronizacaoDrive) até ela ser confirmada no
+// Drive (ver marcarSincronizadoComDrive) — usado pelo aviso de "fechar sem sincronizar" mais abaixo.
+let existeMudancaLocalNaoSincronizada = false;
 
 // Identifica de qual aparelho veio a última mudança (só informativo por enquanto, guardado no próprio
 // payload sincronizado) — não é PII, é só um UUID aleatório sem ligação com o usuário.
@@ -7076,6 +7079,23 @@ function obterIdDispositivoSync() {
         localStorage.setItem("spp_dispositivo_id", id);
     }
     return id;
+}
+
+// NOVO: timestamp (_syncMeta.ultimaModificacaoEm) do conteúdo remoto que ESTE aparelho viu/confirmou da
+// última vez que sincronizou de verdade — guardado fora de "dados" de propósito (não pode viajar pelo
+// próprio sync, cada aparelho precisa ter o seu valor). Ver sincronizarComDrive: junto com "o remoto é
+// mais novo que o meu local", isso detecta também "o remoto MUDOU desde a última vez que eu olhei",
+// mesmo quando o meu timestamp local por acaso é cronologicamente mais novo — caso real: dois aparelhos
+// editando OFFLINE ao mesmo tempo, cada um sem nunca ter visto a mudança do outro; sem essa checagem,
+// quem sincronizasse por último sobrescrevia o Drive em silêncio, sem nenhum aviso de conflito, mesmo
+// com os dois tendo mudanças legítimas e diferentes.
+function obterTimestampRemotoVisto() {
+    const v = localStorage.getItem("spp_ultimo_timestamp_remoto_visto");
+    return v === null ? null : Number(v);
+}
+function marcarSincronizadoComDrive(timestamp) {
+    localStorage.setItem("spp_ultimo_timestamp_remoto_visto", String(timestamp));
+    existeMudancaLocalNaoSincronizada = false;
 }
 
 function inicializarGoogleTokenClient() {
@@ -7154,6 +7174,7 @@ function desconectarGoogleDrive() {
     googleAccessToken = null;
     driveConectado = false;
     driveArquivoIdCache = null;
+    existeMudancaLocalNaoSincronizada = false;
     localStorage.removeItem("spp_drive_auto_conectar");
     atualizarUiSincronizacaoDrive();
 }
@@ -7284,11 +7305,18 @@ function enviarParaDrive(fileIdExistente, payload) {
 // substitui "dados" inteiro (já vem com srsItems dentro, igual o backup manual) e recarrega a página
 // em vez de tentar remendar variáveis já cacheadas em memória com o valor novo.
 function aplicarDadosRemotosDrive(remoto) {
+    // NOVO: captura ANTES de salvar() rodar — salvarDados() sempre carimba um novo "agora" em
+    // dados._syncMeta.ultimaModificacaoEm (ver lá), então depois dali já não reflete mais o timestamp
+    // do remoto que estamos de fato aceitando aqui (ver marcarSincronizadoComDrive/obterTimestampRemotoVisto).
+    const timestampRemotoAplicado = (remoto._syncMeta && remoto._syncMeta.ultimaModificacaoEm) || 0;
     dados = remoto;
     srsItemsAlterado = true;
     // NOVO: mesmo cuidado de importarDados/importarBackupComLivros — espera a gravação do SRS no
     // IndexedDB terminar antes de recarregar, senão os cards vindos do Drive podiam se perder no reload.
-    salvar().then(() => location.reload());
+    salvar().then(() => {
+        marcarSincronizadoComDrive(timestampRemotoAplicado);
+        location.reload();
+    });
 }
 
 // Ponto central: decide se sobe (local mais novo) ou baixa (remoto mais novo), nunca as duas coisas na
@@ -7304,11 +7332,21 @@ function sincronizarComDrive() {
             // aparelho, então essa "comparação" já conta como confirmada de verdade.
             sincronizacaoDriveConfirmadaNestaSessao = true;
             dadosLocaisNaoComparadosComDrive = false;
-            return enviarParaDrive(null, dados);
+            return enviarParaDrive(null, dados).then(() => marcarSincronizadoComDrive(dados._syncMeta.ultimaModificacaoEm));
         }
         return baixarConteudoDrive(fileId).then(remoto => {
             const timestampRemoto = (remoto && remoto._syncMeta && remoto._syncMeta.ultimaModificacaoEm) || 0;
             const timestampLocal = (dados._syncMeta && dados._syncMeta.ultimaModificacaoEm) || 0;
+            // NOVO: o remoto mudou desde a última vez que ESTE aparelho olhou pra ele (ver
+            // obterTimestampRemotoVisto) — pega o caso de dois aparelhos editando OFFLINE ao mesmo
+            // tempo: mesmo que o MEU timestamp local seja cronologicamente mais novo que o que acabou de
+            // chegar do Drive (e por isso a comparação abaixo sozinha deixaria passar, "local vence"),
+            // ser DIFERENTE do que eu vi da última vez já significa que outro aparelho sincronizou uma
+            // versão que eu nunca cheguei a comparar com a minha — não dá pra decidir sozinho quem leva.
+            // null (nunca sincronizei antes nesse aparelho) não conta como "mudou": a comparação de
+            // timestamp abaixo já cobre certo esse caso sozinha.
+            const timestampRemotoVistoAntes = obterTimestampRemotoVisto();
+            const remotoMudouDesdeQueEuVi = timestampRemotoVistoAntes !== null && timestampRemoto !== timestampRemotoVistoAntes;
             // NOVO: se os dados locais rodaram resetDiario()/verificarGameOver() SEM uma comparação já
             // confirmada com o Drive nessa sessão (ver dadosLocaisNaoComparadosComDrive/
             // rodarResetDiarioEGameOverUmaVez), o timestamp local não é confiável — mesmo que ele
@@ -7316,12 +7354,12 @@ function sincronizarComDrive() {
             // processamento), sempre mostra o aviso de conflito em vez de decidir sozinho. É o que
             // garante que conectar o Drive DEPOIS do teto de espera estourar ainda oferece a chance de
             // puxar a versão de outro aparelho, em vez de sobrescrever o Drive em silêncio.
-            if (timestampRemoto > timestampLocal || dadosLocaisNaoComparadosComDrive) {
+            if (timestampRemoto > timestampLocal || dadosLocaisNaoComparadosComDrive || remotoMudouDesdeQueEuVi) {
                 avisarConflitoSincronizacaoDrive(remoto);
                 return;
             }
             sincronizacaoDriveConfirmadaNestaSessao = true;
-            return enviarParaDrive(fileId, dados);
+            return enviarParaDrive(fileId, dados).then(() => marcarSincronizadoComDrive(dados._syncMeta.ultimaModificacaoEm));
         });
     }).then(() => {
         driveUltimaSincronizacaoEm = Date.now();
@@ -7335,6 +7373,7 @@ function sincronizarComDrive() {
 // depois de um período sem nenhuma mudança nova, pra não subir pro Drive a cada tecla/clique.
 function agendarSincronizacaoDrive() {
     if (!driveConectado) return;
+    existeMudancaLocalNaoSincronizada = true;
     clearTimeout(syncDrivePendente);
     syncDrivePendente = setTimeout(sincronizarComDrive, SYNC_DRIVE_DEBOUNCE_MS);
 }
@@ -7378,7 +7417,9 @@ function manterVersaoLocalDrive() {
     const banner = document.getElementById("drive-conflito-banner");
     if (banner) banner.classList.add("oculto");
     // a versão local "ganha" a partir de agora -- sobrescreve a que estava no Drive com a de cá
-    enviarParaDrive(driveArquivoIdCache, dados).catch(err => console.error("Falha ao subir a versão local pro Drive:", err));
+    enviarParaDrive(driveArquivoIdCache, dados)
+        .then(() => marcarSincronizadoComDrive(dados._syncMeta.ultimaModificacaoEm))
+        .catch(err => console.error("Falha ao subir a versão local pro Drive:", err));
     // NOVO: se resetDiario()/verificarGameOver() ficaram represados esperando essa decisão (ver
     // aguardarChecagemInicialDoDrive/inicializarAppComSrsItems), rodam agora que o usuário confirmou de
     // propósito que quer seguir com os dados locais mesmo assim. Não faz nada se já tinham rodado antes
@@ -7408,6 +7449,20 @@ function atualizarUiSincronizacaoDrive() {
         btnSyncMidia.classList.add("oculto");
     }
 }
+
+// NOVO: avisa antes de fechar/recarregar a aba se existe mudança local que ainda não foi confirmada no
+// Drive (ver existeMudancaLocalNaoSincronizada/agendarSincronizacaoDrive), ou um conflito pendente que o
+// usuário ainda não resolveu (ver avisarConflitoSincronizacaoDrive) — sem isso, fechar o app logo depois
+// de mexer em algo (ex: no celular, antes dos 20s de debounce terminarem) deixava essa mudança só local
+// até a próxima sincronização, sem nenhum aviso. Navegadores modernos ignoram o texto da mensagem e
+// mostram a própria genérica ("As alterações feitas não serão salvas") — o que dá pra controlar daqui é
+// só SE o aviso aparece, não o texto dele.
+window.addEventListener("beforeunload", (e) => {
+    if (!driveConectado || (!existeMudancaLocalNaoSincronizada && !dadosRemotosPendentesConflito)) return;
+    e.preventDefault();
+    e.returnValue = "";
+    return "";
+});
 
 // ============================================================
 // === MÍDIA DOS CARDS NO GOOGLE DRIVE (upload manual + download sob demanda) ===
