@@ -4773,7 +4773,88 @@ function converterCbrParaCbzArrayBuffer(arrayBufferCbr, nomeArquivoOriginal) {
     });
 }
 
-// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ e/ou CBR de uma vez) ---
+// === SUPORTE A .MOBI/.AZW/.AZW3 NA BIBLIOTECA ===
+// Ao contrário do CBR (que é convertido pra CBZ no upload), aqui os bytes originais do MOBI/AZW3 ficam
+// guardados como estão — a biblioteca abaixo lê o formato direto, sem precisar converter antes (como o
+// PDF/EPUB já fazem, reabrindo o arquivo original a cada leitura, não um formato intermediário).
+// Usamos a mobi-parser.js (MIT, do mesmo projeto por trás do leitor real "Foliate" — ver
+// mobi-parser/LICENSE) — biblioteca real confirmada pelo próprio ReadEra como a que eles usam pra MOBI
+// (no readme que eles mesmo distribuem, exigido pela licença AGPL do módulo deles). O build "pronto pro
+// navegador" publicado no npm não é autocontido (importa mais 5 pacotes auxiliares que não resolvem
+// sozinhos num <script>) — por isso o arquivo aqui (mobi-parser/mobi-parser.js) é um bundle único feito
+// com esbuild juntando a biblioteca + essas 5 dependências, hospedado no próprio repositório. Diferente
+// da libarchive.js, aqui não é por causa de Worker — é só porque não existe uma versão "pronta"
+// publicada que já resolva isso sozinha.
+// Carregada sob demanda (import() dinâmico) só no primeiro MOBI/AZW3 enviado.
+let promiseMobiParser = null;
+function carregarBibliotecaMobi() {
+    if (!promiseMobiParser) promiseMobiParser = import("./mobi-parser/mobi-parser.js");
+    return promiseMobiParser;
+}
+
+// Tempo máximo tolerado tentando abrir um MOBI/AZW3 — achamos (testando, não só lendo a doc) um caso
+// real em que a biblioteca trava (não lança erro, nunca retorna) num arquivo com conteúdo MOBI salvo
+// com a extensão .azw3 trocada; sem esse teto, o upload desse arquivo específico travaria a tela pra
+// sempre em vez de simplesmente mostrar um erro.
+const TIMEOUT_ABRIR_MOBI_MS = 45000;
+
+// MOBI (antigo, "MOBI6"/PalmDOC) e KF8/AZW3 (novo) são estruturalmente diferentes por dentro, mas a
+// biblioteca não detecta sozinha qual é qual antes de tentar — na prática (testado contra arquivos reais
+// dos dois tipos, incluindo um arquivo "combo" com os dois formatos no mesmo .mobi), tentar KF8 primeiro
+// e cair pro MOBI6 se der erro classifica certo em todos os casos, sem precisar reimplementar a leitura
+// do cabeçalho binário só pra decidir qual chamar.
+// "formatoConhecido" pula a tentativa dupla quando já sabemos qual funcionou (ver
+// dados.biblioteca[].formatoMobi, gravado no upload) — evita repetir a tentativa com KF8 toda vez que o
+// livro é reaberto pra leitura.
+function inicializarLivroMobiKf8(arrayBuffer, nomeArquivo, formatoConhecido) {
+    return carregarBibliotecaMobi().then(({ initKf8File, initMobiFile }) => {
+        globalThis.__BROWSER__ = true; // sem isso a lib tenta resolver caminho de arquivo local, não blob — ver testes oficiais da lib
+        const file = new File([arrayBuffer], nomeArquivo);
+        const comTimeout = promessa => Promise.race([
+            promessa,
+            new Promise((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), TIMEOUT_ABRIR_MOBI_MS))
+        ]);
+
+        if (formatoConhecido === "mobi6") return comTimeout(initMobiFile(file)).then(livro => ({ livro, formato: "mobi6" }));
+        if (formatoConhecido === "kf8") return comTimeout(initKf8File(file)).then(livro => ({ livro, formato: "kf8" }));
+
+        return comTimeout(initKf8File(file)).then(livro => ({ livro, formato: "kf8" }))
+            .catch(() => comTimeout(initMobiFile(file)).then(livro => ({ livro, formato: "mobi6" })));
+    });
+}
+
+// Mesmo padrão de gerarCapaEPUB: a capa vem como blob: (resolvido pela própria lib), mas blob: não
+// sobrevive a um reload da página — converte pra data URL de verdade antes de guardar em capaDataUrl.
+function converterCapaMobiParaDataUrl(blobUrl) {
+    if (!blobUrl) return Promise.resolve(null);
+    return fetch(blobUrl).then(r => r.blob()).then(blob => new Promise(resolve => {
+        const leitor = new FileReader();
+        leitor.onload = () => resolve(leitor.result);
+        leitor.onerror = () => resolve(null);
+        leitor.readAsDataURL(blob);
+    })).catch(() => null);
+}
+
+// O HTML de cada capítulo vem direto do arquivo do usuário — passa pela MESMA sanitização allowlist já
+// usada nos campos importados de .apkg (ver sanitizarNoAnki/CLAUDE.md), nunca confiando no conteúdo de
+// um arquivo de fora. Remove <style>/<link> igual lá (então o capítulo aparece sem a formatação/CSS
+// original do livro, só o texto) — mesma troca segurança-por-estilo já aceita nesse ponto do app.
+function sanitizarHtmlCapituloMobi(htmlBruto) {
+    const doc = new DOMParser().parseFromString(htmlBruto, "text/html");
+    sanitizarNoAnki(doc.body);
+    // NOVO: sanitizarNoAnki guarda o src de toda <img> em data-srs-img-src-original em vez de manter em
+    // "src" — pensado pro pipeline do Anki, onde esse valor é só um NOME DE ARQUIVO dentro do .apkg que
+    // precisa ser resolvido depois contra a mídia já importada (ver extrairCampoAnkiComoHtml). Aqui o
+    // valor já É uma blob: de verdade, criada pela própria mobi-parser.js — sem resolução nenhuma pra
+    // fazer, só devolver pro "src" direto (sem isso, toda imagem do capítulo ficava invisível).
+    doc.body.querySelectorAll("img[data-srs-img-src-original]").forEach(img => {
+        img.setAttribute("src", img.getAttribute("data-srs-img-src-original"));
+        img.removeAttribute("data-srs-img-src-original");
+    });
+    return doc.body.innerHTML;
+}
+
+// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ, CBR e/ou MOBI/AZW/AZW3 de uma vez) ---
 function handleUploadLivros(event) {
     const arquivos = Array.from(event.target.files || []);
     if (arquivos.length === 0) return;
@@ -4796,12 +4877,13 @@ function handleUploadLivros(event) {
 
         const nomeMin = arquivo.name.toLowerCase();
         const ehCbr = nomeMin.endsWith(".cbr");
-        const tipo = nomeMin.endsWith(".epub") ? "epub" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf");
+        const ehMobi = nomeMin.endsWith(".mobi") || nomeMin.endsWith(".azw3") || nomeMin.endsWith(".azw");
+        const tipo = nomeMin.endsWith(".epub") ? "epub" : (ehMobi ? "mobi" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf"));
         const reader = new FileReader();
         reader.onload = function(e) {
             let arrayBuffer = e.target.result; // reatribuído pro ZIP convertido quando ehCbr (ver abaixo)
             const id = Date.now() + "_" + idx + "_" + Math.floor(Math.random() * 100000);
-            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr)$/i, "");
+            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr|mobi|azw3|azw)$/i, "");
 
             const finalizarAdicao = (dadosLivro) => {
                 salvarArquivoLivro(id, arrayBuffer).then(() => {
@@ -4861,6 +4943,31 @@ function handleUploadLivros(event) {
                     statusEl.innerText = ehCbr
                         ? `Não foi possível converter "${arquivo.name}" (RAR não suportado ou corrompido).`
                         : `Erro ao processar "${arquivo.name}".`;
+                });
+            } else if (tipo === "mobi") {
+                inicializarLivroMobiKf8(arrayBuffer, arquivo.name).then(({ livro: parser, formato }) => {
+                    const spine = parser.getSpine();
+                    if (spine.length === 0) {
+                        processados++;
+                        statusEl.innerText = `"${arquivo.name}" não tem nenhum capítulo (MOBI inválido).`;
+                        return;
+                    }
+                    const metadata = parser.getMetadata();
+                    converterCapaMobiParaDataUrl(parser.getCoverImage()).then(capaDataUrl => {
+                        parser.destroy();
+                        finalizarAdicao({
+                            id: id, tipo: "mobi", titulo: metadata.title || titulo,
+                            paginaAtual: 1, totalPaginas: spine.length,
+                            formatoMobi: formato, capaDataUrl: capaDataUrl,
+                            concluido: false, dataUpload: hoje(), dataConclusao: null
+                        });
+                    });
+                }).catch(err => {
+                    console.error("Erro ao ler MOBI:", err);
+                    processados++;
+                    statusEl.innerText = (err && err.message === "TIMEOUT")
+                        ? `"${arquivo.name}" demorou demais pra processar — pulado.`
+                        : `Não foi possível processar "${arquivo.name}" (formato não suportado ou corrompido).`;
                 });
             } else {
                 const bookTemp = ePub(arrayBuffer.slice(0));
@@ -4992,7 +5099,7 @@ function renderizarBiblioteca() {
     const emAndamento = dados.biblioteca.filter(l => !l.concluido);
     const concluidos = dados.biblioteca.filter(l => l.concluido);
 
-    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ ou CBR acima para começar.");
+    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR ou MOBI acima para começar.");
     estanteEl.innerHTML = montarSecaoComPrateleiras(concluidos, true, "Nenhum livro concluído ainda.");
 }
 
@@ -5082,8 +5189,8 @@ function removerLivroDaPrateleira() {
 
 function montarCardLivro(livro, concluido) {
     const tipo = livro.tipo || "pdf";
-    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : "📖");
-    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : "PDF");
+    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : (tipo === "mobi" ? "📘" : "📖"));
+    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : (tipo === "mobi" ? "MOBI" : "PDF"));
     const capaHtml = livro.capaDataUrl ? `<img src="${livro.capaDataUrl}" alt="Capa de ${escaparHtml(livro.titulo)}">` : (concluido ? "📚" : iconeCapa);
     const tituloSeguro = escaparHtml(livro.titulo);
     const btnPrateleira = `<button class="btn-prateleira-livro" onclick="abrirSeletorPrateleira('${livro.id}')" title="${livro.prateleira ? "Prateleira: " + escaparHtml(livro.prateleira) : "Mover para prateleira"}">📁</button>`;
@@ -5094,7 +5201,9 @@ function montarCardLivro(livro, concluido) {
         progressoTxt = livro.capituloAtual ? `Cap. ${livro.capituloAtual} / ${livro.totalCapitulos} (${pct}%)` : `${pct}% lido`;
     } else {
         pct = livro.totalPaginas > 0 ? Math.round((livro.paginaAtual / livro.totalPaginas) * 100) : 0;
-        progressoTxt = `Pág. ${livro.paginaAtual} / ${livro.totalPaginas} (${pct}%)`;
+        // NOVO: MOBI pagina por capítulo, não por página — mesmo cálculo de paginaAtual/totalPaginas
+        // do PDF/CBZ (continua tudo funcionando igual), só o rótulo muda pra não confundir.
+        progressoTxt = tipo === "mobi" ? `Cap. ${livro.paginaAtual} / ${livro.totalPaginas} (${pct}%)` : `Pág. ${livro.paginaAtual} / ${livro.totalPaginas} (${pct}%)`;
     }
 
     if (concluido) {
@@ -5103,12 +5212,13 @@ function montarCardLivro(livro, concluido) {
     return `<div class="livro-card"><div class="livro-capa">${capaHtml}</div><span class="livro-tipo-tag">${tagTipo}</span><span class="livro-titulo">${tituloSeguro}</span><span class="livro-progresso-txt">${progressoTxt}</span><div class="barra-livro"><div class="fill-livro" style="width:${pct}%"></div></div><div class="livro-acoes"><button class="btn-continuar-leitura" onclick="abrirLeitor('${livro.id}')">📖 Ler</button>${btnPrateleira}<button class="btn-remover-livro" onclick="removerLivro('${livro.id}')">🗑️</button></div></div>`;
 }
 
-// --- Leitor (PDF via canvas + camada de texto, EPUB via epub.js) ---
-let leitorTipoAtual = null; // 'pdf', 'epub' ou 'cbz'
+// --- Leitor (PDF via canvas + camada de texto, EPUB via epub.js, MOBI/AZW3 via mobi-parser.js) ---
+let leitorTipoAtual = null; // 'pdf', 'epub', 'cbz' ou 'mobi'
 let leitorPdfAtual = null;
 let leitorEpubBook = null;
 let leitorEpubRendition = null;
 let leitorCbzPaginas = []; // URLs de imagem (blob:) das páginas do CBZ aberto, em ordem
+let leitorMobiLivro = null; // instância Mobi/Kf8 (mobi-parser.js) do MOBI/AZW3 aberto
 let leitorLivroAtualId = null;
 let leitorPaginaAtual = 1;
 let leitorRenderizando = false;
@@ -5122,6 +5232,7 @@ function abrirLeitor(id) {
     const tipo = livro.tipo || "pdf";
     if (tipo === "epub") abrirLeitorEpub(livro);
     else if (tipo === "cbz") abrirLeitorCbz(livro);
+    else if (tipo === "mobi") abrirLeitorMobi(livro);
     else abrirLeitorPdf(livro);
 }
 
@@ -5202,6 +5313,54 @@ function abrirLeitorCbz(livro) {
                 });
         }).catch(err => { console.error(err); alert("Não foi possível abrir este CBZ. Verifique se o arquivo não está corrompido."); });
     });
+}
+
+// NOVO: abre um MOBI/AZW3 — usa o formato já descoberto no upload (livro.formatoMobi), sem precisar
+// tentar KF8 primeiro de novo a cada leitura (ver inicializarLivroMobiKf8).
+function abrirLeitorMobi(livro) {
+    if (leitorMobiLivro) { leitorMobiLivro.destroy(); leitorMobiLivro = null; } // livro MOBI anterior, se houver (ver fecharLeitor)
+    carregarArquivoLivro(livro.id).then(arrayBuffer => {
+        if (!arrayBuffer) { alert("Arquivo não encontrado. Ele pode ter sido removido."); return; }
+        const nomeParaLib = (livro.titulo || "livro") + "." + (livro.formatoMobi === "kf8" ? "azw3" : "mobi");
+        inicializarLivroMobiKf8(arrayBuffer, nomeParaLib, livro.formatoMobi).then(({ livro: parser }) => {
+            leitorMobiLivro = parser;
+            leitorTipoAtual = "mobi";
+            leitorLivroAtualId = livro.id;
+            leitorPaginaAtual = Math.min(livro.paginaAtual || 1, parser.getSpine().length);
+
+            document.getElementById("leitor-titulo-livro").innerText = livro.titulo;
+            document.getElementById("pdf-page-wrapper").classList.add("oculto");
+            document.getElementById("epub-viewer").classList.add("oculto");
+            document.getElementById("cbz-viewer").classList.add("oculto");
+            document.getElementById("mobi-viewer").classList.remove("oculto");
+            document.getElementById("leitor-pdf").classList.remove("oculto");
+            document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
+            renderizarAnotacoesLivro(livro);
+            configurarUiLeitorPorTipo("mobi");
+
+            renderizarCapituloMobi(leitorPaginaAtual);
+        }).catch(err => {
+            console.error("Erro ao abrir MOBI:", err);
+            alert(err && err.message === "TIMEOUT" ? "Esse arquivo demorou demais pra abrir." : "Não foi possível abrir este MOBI. Verifique se o arquivo não está corrompido.");
+        });
+    });
+}
+
+function renderizarCapituloMobi(numCapitulo) {
+    if (!leitorMobiLivro) return;
+    const spine = leitorMobiLivro.getSpine();
+    const alvo = Math.max(1, Math.min(numCapitulo, spine.length));
+    const resultado = leitorMobiLivro.loadChapter(spine[alvo - 1].id);
+    const container = document.getElementById("mobi-viewer");
+    // NOVO: sanitiza o HTML do capítulo (vem direto do arquivo do usuário) antes de exibir — ver
+    // sanitizarHtmlCapituloMobi. O CSS original do livro não sobrevive a isso de propósito (mesma troca
+    // já aceita na importação de .apkg): o texto aparece sem a formatação do editor, só o conteúdo.
+    container.innerHTML = resultado ? sanitizarHtmlCapituloMobi(resultado.html) : "<p>Não foi possível carregar este capítulo.</p>";
+
+    leitorPaginaAtual = alvo;
+    document.getElementById("leitor-pagina-info").innerText = `Cap. ${alvo} / ${spine.length}`;
+    atualizarBotoesNavegacaoLeitor();
+    salvarProgressoLeituraAtual();
 }
 
 function renderizarPaginaCBZ(numPagina) {
@@ -5527,7 +5686,9 @@ function destacarTermoNaPaginaPDF(termo) {
 // (ir-para-página não existe no EPUB; busca de texto não existe no CBZ).
 function configurarUiLeitorPorTipo(tipo) {
     document.getElementById("form-ir-pagina").classList.toggle("oculto", tipo === "epub");
-    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz");
+    // NOVO: MOBI tem texto de verdade (diferente do CBZ, que é imagem), mas busca entre capítulos
+    // carregados sob demanda fica pra uma próxima vez — por ora some igual o CBZ.
+    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz" || tipo === "mobi");
     document.getElementById("btn-finalizar-leitura").classList.add("oculto");
     resetBuscaLivro();
 }
@@ -5626,6 +5787,7 @@ function navegarResultadoBusca(direcaoOuIndice, absoluto) {
 function obterTotalPaginasAtual() {
     if (leitorTipoAtual === "pdf") return leitorPdfAtual ? leitorPdfAtual.numPages : 1;
     if (leitorTipoAtual === "cbz") return leitorCbzPaginas.length;
+    if (leitorTipoAtual === "mobi") return leitorMobiLivro ? leitorMobiLivro.getSpine().length : 1;
     return 1;
 }
 
@@ -5679,30 +5841,33 @@ function proximaPagina() {
     resetScrollLeitor();
     if (leitorTipoAtual === "epub") { if (leitorEpubRendition) leitorEpubRendition.next(); }
     else if (leitorTipoAtual === "cbz") { if (leitorPaginaAtual < leitorCbzPaginas.length) renderizarPaginaCBZ(leitorPaginaAtual + 1); }
+    else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual < obterTotalPaginasAtual()) renderizarCapituloMobi(leitorPaginaAtual + 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual < leitorPdfAtual.numPages) renderizarPaginaPDF(leitorPaginaAtual + 1); }
 }
 function paginaAnterior() {
     resetScrollLeitor();
     if (leitorTipoAtual === "epub") { if (leitorEpubRendition) leitorEpubRendition.prev(); }
     else if (leitorTipoAtual === "cbz") { if (leitorPaginaAtual > 1) renderizarPaginaCBZ(leitorPaginaAtual - 1); }
+    else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual > 1) renderizarCapituloMobi(leitorPaginaAtual - 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual > 1) renderizarPaginaPDF(leitorPaginaAtual - 1); }
 }
 
-// NOVO: vai direto para a página digitada (só PDF/CBZ — EPUB não pagina por número).
+// NOVO: vai direto para a página/capítulo digitado (PDF/CBZ/MOBI — EPUB não pagina por número).
 function irParaPaginaDigitada() {
     const input = document.getElementById("input-ir-pagina");
     const numero = parseInt(input.value, 10);
-    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz")) return;
+    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi")) return;
     const total = obterTotalPaginasAtual();
     const alvo = Math.max(1, Math.min(numero, total));
     resetScrollLeitor();
     if (leitorTipoAtual === "cbz") renderizarPaginaCBZ(alvo);
+    else if (leitorTipoAtual === "mobi") renderizarCapituloMobi(alvo);
     else renderizarPaginaPDF(alvo);
     input.value = "";
 }
 
 function salvarProgressoLeituraAtual() {
-    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz")) return;
+    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi")) return;
     const livro = dados.biblioteca.find(l => l.id === leitorLivroAtualId);
     if (!livro) return;
 
@@ -5725,6 +5890,12 @@ function fecharLeitor() {
     leitorCbzPaginas = [];
     const cbzImg = document.getElementById("cbz-imagem");
     if (cbzImg) cbzImg.src = "";
+
+    // NOVO: destroy() da mobi-parser.js já revoga sozinha todas as blob: que ela criou (capítulos, capa,
+    // css) — ver mobi-parser/LICENSE/fonte. Só precisamos limpar a referência e o conteúdo exibido.
+    if (leitorMobiLivro) { leitorMobiLivro.destroy(); leitorMobiLivro = null; }
+    const mobiViewerEl = document.getElementById("mobi-viewer");
+    if (mobiViewerEl) mobiViewerEl.innerHTML = "";
 
     resetBuscaLivro();
 

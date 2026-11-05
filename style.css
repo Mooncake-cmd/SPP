@@ -705,6 +705,21 @@ button:hover { filter: brightness(0.9); }
     background: var(--card-bg);
 }
 
+/* NOVO: capítulo de MOBI/AZW3 (ver renderizarCapituloMobi) — diferente do epub-viewer (que o próprio
+   epub.js controla por dentro), aqui é só o HTML sanitizado do capítulo direto num div rolável. */
+#mobi-viewer {
+    width: 100%;
+    max-height: 600px;
+    overflow-y: auto;
+    background: var(--card-bg);
+    color: var(--text-color);
+    text-align: left;
+    padding: 20px;
+    box-sizing: border-box;
+    line-height: 1.6;
+}
+#mobi-viewer img { max-width: 100%; height: auto; }
+
 .leitor-controles {
     display: flex;
     align-items: center;

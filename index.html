@@ -408,10 +408,10 @@
         <div id="aba-biblioteca" class="tab-content">
             <section class="card">
                 <h2>📚 Biblioteca de Livros</h2>
-                <input type="file" id="input-livro-upload" accept=".pdf,.epub,.cbz,.cbr,application/pdf,application/epub+zip" multiple style="display:none" onchange="handleUploadLivros(event)">
+                <input type="file" id="input-livro-upload" accept=".pdf,.epub,.cbz,.cbr,.mobi,.azw,.azw3,application/pdf,application/epub+zip" multiple style="display:none" onchange="handleUploadLivros(event)">
                 <div class="biblioteca-upload-area" id="area-upload-livro" onclick="document.getElementById('input-livro-upload').click()">
                     <span class="upload-icon">📤</span>
-                    <p>Clique para enviar um ou mais livros (PDF, EPUB, CBZ ou CBR)</p>
+                    <p>Clique para enviar um ou mais livros (PDF, EPUB, CBZ, CBR ou MOBI)</p>
                     <small>Os arquivos ficam salvos apenas neste navegador/dispositivo</small>
                 </div>
                 <p id="biblioteca-status-import" class="biblioteca-status-import"></p>
@@ -420,7 +420,7 @@
             <section class="card">
                 <h2>📖 Lendo agora</h2>
                 <div id="lista-biblioteca" class="biblioteca-grid">
-                    <p class="biblioteca-vazio">Nenhum livro em andamento. Envie um PDF, EPUB, CBZ ou CBR acima para começar.</p>
+                    <p class="biblioteca-vazio">Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR ou MOBI acima para começar.</p>
                 </div>
             </section>
 
@@ -447,6 +447,7 @@
                         <div id="pdf-text-layer"></div>
                     </div>
                     <div id="epub-viewer" class="oculto"></div>
+                    <div id="mobi-viewer" class="oculto"></div>
                     <div id="cbz-viewer" class="oculto">
                         <img id="cbz-imagem" alt="Página do quadrinho" draggable="false">
                         <div class="cbz-zoom-controles">
