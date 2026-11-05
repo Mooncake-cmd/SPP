@@ -4720,7 +4720,60 @@ function flattenToc(tocArray) {
     return resultado;
 }
 
-// --- Upload (aceita múltiplos arquivos PDF e/ou EPUB de uma vez) ---
+// === SUPORTE A .CBR (RAR) NA BIBLIOTECA — convertido pra CBZ automaticamente no upload ===
+// CBR é só um RAR com a extensão trocada, do mesmo jeito que CBZ é um ZIP — mas o navegador não lê RAR
+// nativamente (ao contrário de ZIP, que o JSZip já cobre). Usamos a libarchive.js (porta em WASM da
+// libarchive de verdade — licença BSD, leitura de RAR4 e RAR5 confirmada nos dois, inclusive testado
+// contra os próprios arquivos de teste do projeto) só pra EXTRAIR as páginas; a partir daí remontamos
+// um ZIP de verdade com o JSZip que o site já usa, e entregamos pro MESMO caminho que um CBZ nativo já
+// usa (ver handleUploadLivros) — nenhuma outra parte do app (leitor, zoom, limite diário de 5/dia,
+// backup) precisa saber que esse livro um dia foi um .cbr; o que fica salvo (salvarArquivoLivro) já é
+// o ZIP convertido, não os bytes originais do RAR.
+// Carregada sob demanda (import() dinâmico) só na primeira vez que o usuário sobe um .cbr — ~1MB de
+// wasm que não faz sentido pesar o carregamento do site pra quem nunca usa CBR.
+// NOVO: diferente das outras bibliotecas do site (jszip, sql.js, etc.), essa fica hospedada aqui no
+// próprio repositório (pasta libarchive/, ver LICENSE lá dentro) em vez de vir de CDN — ela carrega um
+// Web Worker próprio (dist/worker-bundle.js), e navegador nenhum permite construir um Worker a partir
+// de um script de OUTRA origem (ex: cdn.jsdelivr.net enquanto o site roda em mooncake-cmd.github.io);
+// confirmado travando de verdade (sem nem lançar erro) ao tentar com a origem do CDN. Com os 3 arquivos
+// (libarchive.js/worker-bundle.js/libarchive.wasm) servidos daqui, tudo fica na mesma origem do site e
+// a resolução relativa de caminho que a própria lib já faz sozinha (sem precisar apontar workerUrl na
+// mão) funciona — testado de ponta a ponta com os arquivos de teste RAR4 e RAR5 do projeto.
+let promiseArchiveCbr = null;
+function carregarBibliotecaCbr() {
+    if (!promiseArchiveCbr) {
+        promiseArchiveCbr = import("./libarchive/libarchive.js")
+            .then(mod => { mod.Archive.init(); return mod.Archive; });
+    }
+    return promiseArchiveCbr;
+}
+// Achata a árvore de pastas que archive.extractFiles() devolve (objeto aninhado por pasta) numa lista
+// plana de [caminho, File].
+function achatarArquivosExtraidosCbr(obj, prefixo) {
+    let saida = [];
+    for (const chave of Object.keys(obj)) {
+        const valor = obj[chave];
+        if (valor instanceof File) saida.push([prefixo + chave, valor]);
+        else saida = saida.concat(achatarArquivosExtraidosCbr(valor, prefixo + chave + "/"));
+    }
+    return saida;
+}
+function converterCbrParaCbzArrayBuffer(arrayBufferCbr, nomeArquivoOriginal) {
+    return carregarBibliotecaCbr().then(Archive => {
+        const fileCbr = new File([arrayBufferCbr], nomeArquivoOriginal);
+        return Archive.open(fileCbr).then(archive => archive.extractFiles()).then(extraidos => {
+            const imagens = achatarArquivosExtraidosCbr(extraidos, "")
+                .filter(([caminho]) => /\.(jpe?g|png|gif|webp|bmp)$/i.test(caminho))
+                .sort((a, b) => compararNomesNaturalmente(a[0], b[0]));
+            if (imagens.length === 0) throw new Error("Nenhuma imagem encontrada dentro deste CBR.");
+            const zip = new JSZip();
+            imagens.forEach(([caminho, file]) => zip.file(caminho, file));
+            return zip.generateAsync({ type: "arraybuffer" });
+        });
+    });
+}
+
+// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ e/ou CBR de uma vez) ---
 function handleUploadLivros(event) {
     const arquivos = Array.from(event.target.files || []);
     if (arquivos.length === 0) return;
@@ -4742,12 +4795,13 @@ function handleUploadLivros(event) {
         }
 
         const nomeMin = arquivo.name.toLowerCase();
-        const tipo = nomeMin.endsWith(".epub") ? "epub" : (nomeMin.endsWith(".cbz") ? "cbz" : "pdf");
+        const ehCbr = nomeMin.endsWith(".cbr");
+        const tipo = nomeMin.endsWith(".epub") ? "epub" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf");
         const reader = new FileReader();
         reader.onload = function(e) {
-            const arrayBuffer = e.target.result;
+            let arrayBuffer = e.target.result; // reatribuído pro ZIP convertido quando ehCbr (ver abaixo)
             const id = Date.now() + "_" + idx + "_" + Math.floor(Math.random() * 100000);
-            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz)$/i, "");
+            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr)$/i, "");
 
             const finalizarAdicao = (dadosLivro) => {
                 salvarArquivoLivro(id, arrayBuffer).then(() => {
@@ -4775,14 +4829,21 @@ function handleUploadLivros(event) {
                     statusEl.innerText = `Erro ao processar "${arquivo.name}".`;
                 });
             } else if (tipo === "cbz") {
-                JSZip.loadAsync(arrayBuffer.slice(0)).then(zip => {
+                // NOVO: .cbr cai aqui também (ver detecção de "tipo" acima) — só precisa virar um ZIP de
+                // verdade ANTES (converterCbrParaCbzArrayBuffer); dali em diante é idêntico a um CBZ
+                // nativo, inclusive o que fica salvo em salvarArquivoLivro (arrayBuffer reatribuído).
+                const prontoParaLerComoZip = ehCbr
+                    ? converterCbrParaCbzArrayBuffer(arrayBuffer, arquivo.name).then(zipConvertido => arrayBuffer = zipConvertido)
+                    : Promise.resolve(arrayBuffer);
+
+                prontoParaLerComoZip.then(bufferZip => JSZip.loadAsync(bufferZip.slice(0))).then(zip => {
                     const nomesImagens = Object.keys(zip.files)
                         .filter(nome => !zip.files[nome].dir && /\.(jpe?g|png|gif|webp|bmp)$/i.test(nome))
                         .sort(compararNomesNaturalmente);
 
                     if (nomesImagens.length === 0) {
                         processados++;
-                        statusEl.innerText = `"${arquivo.name}" não parece ter imagens dentro (CBZ inválido).`;
+                        statusEl.innerText = `"${arquivo.name}" não parece ter imagens dentro (${ehCbr ? "CBR" : "CBZ"} inválido).`;
                         return;
                     }
 
@@ -4795,9 +4856,11 @@ function handleUploadLivros(event) {
                         });
                     });
                 }).catch(err => {
-                    console.error("Erro ao ler CBZ:", err);
+                    console.error(`Erro ao ler ${ehCbr ? "CBR" : "CBZ"}:`, err);
                     processados++;
-                    statusEl.innerText = `Erro ao processar "${arquivo.name}".`;
+                    statusEl.innerText = ehCbr
+                        ? `Não foi possível converter "${arquivo.name}" (RAR não suportado ou corrompido).`
+                        : `Erro ao processar "${arquivo.name}".`;
                 });
             } else {
                 const bookTemp = ePub(arrayBuffer.slice(0));
@@ -4929,7 +4992,7 @@ function renderizarBiblioteca() {
     const emAndamento = dados.biblioteca.filter(l => !l.concluido);
     const concluidos = dados.biblioteca.filter(l => l.concluido);
 
-    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB ou CBZ acima para começar.");
+    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ ou CBR acima para começar.");
     estanteEl.innerHTML = montarSecaoComPrateleiras(concluidos, true, "Nenhum livro concluído ainda.");
 }
 

@@ -408,10 +408,10 @@
         <div id="aba-biblioteca" class="tab-content">
             <section class="card">
                 <h2>📚 Biblioteca de Livros</h2>
-                <input type="file" id="input-livro-upload" accept=".pdf,.epub,.cbz,application/pdf,application/epub+zip" multiple style="display:none" onchange="handleUploadLivros(event)">
+                <input type="file" id="input-livro-upload" accept=".pdf,.epub,.cbz,.cbr,application/pdf,application/epub+zip" multiple style="display:none" onchange="handleUploadLivros(event)">
                 <div class="biblioteca-upload-area" id="area-upload-livro" onclick="document.getElementById('input-livro-upload').click()">
                     <span class="upload-icon">📤</span>
-                    <p>Clique para enviar um ou mais livros (PDF, EPUB ou CBZ)</p>
+                    <p>Clique para enviar um ou mais livros (PDF, EPUB, CBZ ou CBR)</p>
                     <small>Os arquivos ficam salvos apenas neste navegador/dispositivo</small>
                 </div>
                 <p id="biblioteca-status-import" class="biblioteca-status-import"></p>
@@ -420,7 +420,7 @@
             <section class="card">
                 <h2>📖 Lendo agora</h2>
                 <div id="lista-biblioteca" class="biblioteca-grid">
-                    <p class="biblioteca-vazio">Nenhum livro em andamento. Envie um PDF, EPUB ou CBZ acima para começar.</p>
+                    <p class="biblioteca-vazio">Nenhum livro em andamento. Envie um PDF, EPUB, CBZ ou CBR acima para começar.</p>
                 </div>
             </section>
 
