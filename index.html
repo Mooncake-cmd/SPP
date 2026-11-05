@@ -17,6 +17,10 @@
     <script src="https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+    <!-- algoritmo de agendamento do SRS (ver "garantirSchedulerFSRS"/processarRevisaoSRS em script.js) —
+         precisa ser o caminho explícito /dist/index.umd.js: o "main" do pacote aponta pra um build CJS,
+         que não funciona num <script> puro sem bundler. -->
+    <script src="https://cdn.jsdelivr.net/npm/ts-fsrs@6.0.0/dist/index.umd.js"></script>
     <!-- login OAuth do Google (ver "SINCRONIZAÇÃO COM GOOGLE DRIVE" em script.js) — só é usado se o
          usuário clicar em "Conectar Google Drive"; sem isso carregado, os botões de sync mostram um aviso. -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -381,6 +385,7 @@
                 <button id="btn-revelar-resposta" class="btn-revelar-resposta oculto" onclick="revelarRespostaSRS()">👁️ Mostrar Resposta</button>
 
                 <div id="srs-controls" class="srs-controls oculto">
+                    <button onclick="processarRevisaoSRS('errei')" class="btn-srs-errei">Errei<br><span id="srs-previa-errei" class="srs-previa-botao"></span></button>
                     <button onclick="processarRevisaoSRS('dificil')" class="btn-srs-dificil">Difícil<br><span id="srs-previa-dificil" class="srs-previa-botao"></span></button>
                     <button onclick="processarRevisaoSRS('bom')" class="btn-srs-bom">Bom<br><span id="srs-previa-bom" class="srs-previa-botao"></span></button>
                     <button onclick="processarRevisaoSRS('facil')" class="btn-srs-facil">Fácil<br><span id="srs-previa-facil" class="srs-previa-botao"></span></button>

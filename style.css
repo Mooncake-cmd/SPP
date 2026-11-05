@@ -385,7 +385,8 @@ button:hover { filter: brightness(0.9); }
     font-size: 0.9em;
 }
 
-.btn-srs-dificil { background-color: var(--danger-color); }
+.btn-srs-errei { background-color: var(--danger-color); }
+.btn-srs-dificil { background-color: var(--warning-color); }
 .btn-srs-bom { background-color: var(--secondary-color); }
 .btn-srs-facil { background-color: var(--primary-color); }
 

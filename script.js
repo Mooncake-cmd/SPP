@@ -1255,10 +1255,10 @@ function construirCardObjetoSRS(tema, subtema, resposta, estadoCloze) {
             id: Date.now(), tema: tema, subtema: subtema, tipo: "cloze",
             clozePartes: estadoCloze.segmentos.map(s => ({ texto: s.texto, lacuna: s.lacuna })),
             resposta: estadoCloze.segmentos.filter(s => s.lacuna).map(s => s.texto.trim()).filter(Boolean).join(", "),
-            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
+            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fsrsEstabilidade: 0, fsrsDificuldade: 0, fsrsUltimaRevisao: null
         };
     }
-    return { id: Date.now(), tema: tema, subtema: subtema, tipo: "normal", resposta: resposta, data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5 };
+    return { id: Date.now(), tema: tema, subtema: subtema, tipo: "normal", resposta: resposta, data_proxima_revisao: hojeISO(), intervalo_atual: 0, fsrsEstabilidade: 0, fsrsDificuldade: 0, fsrsUltimaRevisao: null };
 }
 
 // Extrai o texto e a resposta-alvo de um segmento cloze, aceitando tanto o formato novo ({texto, lacuna})
@@ -3356,7 +3356,7 @@ function converterNotaComTemplateAnki(prep, modelo, flds, tema, zip, nomeParaInd
         const card = {
             id: Date.now() + Math.floor(Math.random() * 1000000),
             tema: tema, subtema: frenteHtml, resposta: versoHtml, tipo: "normal",
-            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
+            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fsrsEstabilidade: 0, fsrsDificuldade: 0, fsrsUltimaRevisao: null
         };
         // Ver comentário em prepararTemplatesAnki — sem {{FrontSide}} no afmt, a resposta é uma tela
         // standalone (não uma continuação da pergunta), então escondemos a pergunta ao revelar (ver
@@ -3478,7 +3478,7 @@ function converterNotaBasicaAnki(campoFrente, campoVerso, tema, zip, nomeParaInd
         const card = {
             id: Date.now() + Math.floor(Math.random() * 1000000),
             tema: tema, subtema: frente.texto, resposta: verso.texto, tipo: "normal",
-            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
+            data_proxima_revisao: hojeISO(), intervalo_atual: 0, fsrsEstabilidade: 0, fsrsDificuldade: 0, fsrsUltimaRevisao: null
         };
         aplicarMidiasExtraidasNoCard(card, "Pergunta", frente);
         aplicarMidiasExtraidasNoCard(card, "Resposta", verso);
@@ -3558,7 +3558,7 @@ function converterNotaClozeAnki(modelo, flds, idxsCamposCloze, tema, zip, nomePa
             const card = {
                 id: Date.now() + Math.floor(Math.random() * 1000000) + ordem,
                 tema: tema, subtema: subtemaExibicao, resposta: resposta, tipo: "cloze", clozePartes: clozePartesCard,
-                data_proxima_revisao: hojeISO(), intervalo_atual: 0, fator_facilidade: 2.5
+                data_proxima_revisao: hojeISO(), intervalo_atual: 0, fsrsEstabilidade: 0, fsrsDificuldade: 0, fsrsUltimaRevisao: null
             };
             aplicarMidiasExtraidasNoCard(card, "Pergunta", { imagens: imagensCombinadas, midias: midiasCombinadas });
             card._midiaNaoSuportada = midiaNaoSuportadaCombinada || !!(versoExtra && versoExtra.midiaNaoSuportada);
@@ -3945,16 +3945,47 @@ function revelarRespostaSRS() {
     document.getElementById("srs-feedback").innerText = "Como foi sua memória?";
 }
 
-// Calcula o intervalo (em dias) que o SM-2 simplificado daria pra um card se ele fosse respondido com
-// essa qualidade — extraído de processarRevisaoSRS pra ser usado TAMBÉM na prévia embaixo dos botões
-// (ver atualizarPreviasBotoesRevisaoSRS), sem duplicar a fórmula em dois lugares que podiam divergir.
-// Não muda nada no card (fator_facilidade de "fácil" só é incrementado de verdade em
-// processarRevisaoSRS, depois que o usuário realmente clica) — é só leitura.
-function calcularNovoIntervaloSRS(item, qualidade) {
-    if (qualidade === 'dificil') return 1;
-    if (qualidade === 'bom') return item.intervalo_atual === 0 ? 1 : Math.ceil(item.intervalo_atual * item.fator_facilidade);
-    if (qualidade === 'facil') return item.intervalo_atual === 0 ? 4 : Math.ceil(item.intervalo_atual * item.fator_facilidade * 1.3);
-    return 0;
+// FSRS-6 (biblioteca real ts-fsrs, ver CLAUDE.md) substitui o SM-2 simplificado que existia aqui.
+// Scheduler único, construído 1x de forma assíncrona e reaproveitado pra toda revisão/prévia depois
+// disso (ver inicializarAppComSrsItems, que já dispara essa construção no carregamento do app, bem
+// antes do usuário conseguir chegar na tela de revisão).
+let schedulerFSRS = null;
+async function garantirSchedulerFSRS() {
+    if (!schedulerFSRS) {
+        schedulerFSRS = await FSRS.DefaultScheduler({
+            version: 'FSRS-6',      // fixa FSRS-6 — não o FSRS-7, que é o novo padrão da lib (ver CLAUDE.md)
+            enableShortTerm: false, // sem "degraus" intraday — cada revisão já vira intervalo em dias, como antes
+            desiredRetention: 0.9,  // mesmo padrão oficial do FSRS e do Anki
+            enableFuzz: false,
+        });
+    }
+    return schedulerFSRS;
+}
+// = { errei: FSRS.Rating.Again, dificil: FSRS.Rating.Hard, bom: FSRS.Rating.Good, facil: FSRS.Rating.Easy }
+const GRADE_FSRS_POR_QUALIDADE_SRS = { errei: 1, dificil: 2, bom: 3, facil: 4 };
+// Monta o card no formato que o ts-fsrs espera (datas como Date de verdade — passar string aqui falha
+// na validação da lib) a partir de como o item é salvo em dados.srsItems.
+function construirCardFsrsDeItem(item) {
+    return {
+        cardId: String(item.id),
+        stability: item.fsrsEstabilidade, difficulty: item.fsrsDificuldade,
+        dueAt: new Date(item.data_proxima_revisao),
+        lastReviewAt: item.fsrsUltimaRevisao ? new Date(item.fsrsUltimaRevisao) : null,
+        state: item.fsrsEstabilidade === 0 ? 0 : 2,
+        scheduleStatus: item.fsrsEstabilidade === 0 ? "new" : "review",
+        scheduledDays: item.intervalo_atual, reps: 0, lapses: 0, learningStep: 0,
+    };
+}
+
+// Calcula o intervalo (em dias) que o FSRS-6 daria pra um card se ele fosse respondido com essa
+// qualidade — usado na prévia embaixo dos botões (ver atualizarPreviasBotoesRevisaoSRS). Chama a
+// MESMA biblioteca/scheduler da revisão de verdade (processarRevisaoSRS), só que sobre uma cópia
+// descartável do estado do card (construirCardFsrsDeItem) — nada aqui é persistido.
+function calcularNovoIntervaloSRS(scheduler, item, qualidade) {
+    const { card: resultado } = scheduler.review({
+        card: construirCardFsrsDeItem(item), grade: GRADE_FSRS_POR_QUALIDADE_SRS[qualidade], now: new Date()
+    });
+    return resultado.scheduledDays;
 }
 function calcularDataProximaRevisaoSRS(intervaloDias) {
     const d = new Date();
@@ -3965,30 +3996,38 @@ function formatarPreviaIntervaloSRS(dias) {
     const rotulo = dias <= 0 ? "hoje" : dias === 1 ? "amanhã" : `em ${dias}d`;
     return `${rotulo} · ${formatarDataBR(calcularDataProximaRevisaoSRS(dias))}`;
 }
-// NOVO: mostra embaixo de cada botão (Difícil/Bom/Fácil) a data em que o card volta a ser revisado SE
-// aquele botão for clicado agora — mesma ideia do Anki, que já mostra o intervalo resultante em cada
-// botão antes da escolha, pra dar uma noção real do efeito de cada resposta.
-function atualizarPreviasBotoesRevisaoSRS(item) {
-    ["dificil", "bom", "facil"].forEach(qualidade => {
+// NOVO: mostra embaixo de cada botão (Errei/Difícil/Bom/Fácil) a data em que o card volta a ser
+// revisado SE aquele botão for clicado agora — mesma ideia do Anki, que já mostra o intervalo
+// resultante em cada botão antes da escolha, pra dar uma noção real do efeito de cada resposta.
+async function atualizarPreviasBotoesRevisaoSRS(item) {
+    const scheduler = await garantirSchedulerFSRS();
+    ["errei", "dificil", "bom", "facil"].forEach(qualidade => {
         const el = document.getElementById(`srs-previa-${qualidade}`);
-        if (el) el.textContent = formatarPreviaIntervaloSRS(calcularNovoIntervaloSRS(item, qualidade));
+        if (el) el.textContent = formatarPreviaIntervaloSRS(calcularNovoIntervaloSRS(scheduler, item, qualidade));
     });
 }
 
-function processarRevisaoSRS(qualidade) {
+async function processarRevisaoSRS(qualidade) {
     if(!cardAtualRevisao) return;
-    // Card em pré-visualização (ver visualizarCardSRS): Difícil/Bom/Fácil aqui não tem NENHUMA
+    // Card em pré-visualização (ver visualizarCardSRS): Errei/Difícil/Bom/Fácil aqui não tem NENHUMA
     // validade — não grava em dados.srsRevisoesLog, não mexe no intervalo/data do card, não credita
     // pontos. É só um jeito de sair da pré-visualização e voltar pra fila normal.
     if (modoPreviewSRS) { sairDoPreviewSRS(); return; }
+    const scheduler = await garantirSchedulerFSRS();
     const intervaloAnterior = cardAtualRevisao.intervalo_atual;
-    const fatorAnterior = cardAtualRevisao.fator_facilidade;
+    const estabilidadeAnterior = cardAtualRevisao.fsrsEstabilidade;
+    const dificuldadeAnterior = cardAtualRevisao.fsrsDificuldade;
 
-    const novoIntervalo = calcularNovoIntervaloSRS(cardAtualRevisao, qualidade);
-    if (qualidade === 'facil') cardAtualRevisao.fator_facilidade += 0.15;
+    const agora = new Date();
+    const { card: resultado } = scheduler.review({
+        card: construirCardFsrsDeItem(cardAtualRevisao), grade: GRADE_FSRS_POR_QUALIDADE_SRS[qualidade], now: agora
+    });
 
-    cardAtualRevisao.intervalo_atual = novoIntervalo;
-    cardAtualRevisao.data_proxima_revisao = calcularDataProximaRevisaoSRS(novoIntervalo);
+    cardAtualRevisao.fsrsEstabilidade = resultado.stability;
+    cardAtualRevisao.fsrsDificuldade = resultado.difficulty;
+    cardAtualRevisao.fsrsUltimaRevisao = agora.toISOString();
+    cardAtualRevisao.intervalo_atual = resultado.scheduledDays;
+    cardAtualRevisao.data_proxima_revisao = calcularDataProximaRevisaoSRS(resultado.scheduledDays);
     dados.pontosAcumulados += 10;
     // NOVO/CORREÇÃO: faltava marcar srsItemsAlterado aqui — sem isso, salvarDados() (logo abaixo)
     // nunca gravava dados.srsItems no IndexedDB depois de uma revisão (só o resto de "dados", que vai
@@ -4000,19 +4039,21 @@ function processarRevisaoSRS(qualidade) {
     srsItemsAlterado = true;
 
     // NOVO: registra cada revisão (não só o estado atual do card, que a linha acima já sobrescreve) —
-    // é a base de dados necessária pra, no futuro, calibrar um algoritmo de agendamento mais sofisticado
-    // (ex: FSRS) com o histórico real de acerto/erro, em vez de só os pesos padrão genéricos. Também é
-    // o que permite saber quantos cards NOVOS (intervalo_anterior === 0) já foram estudados hoje, pro
+    // é a base de dados necessária pra, no futuro, calibrar os pesos do FSRS com o histórico real de
+    // acerto/erro deste usuário (ver CLAUDE.md), em vez de só os pesos padrão genéricos. Também é o
+    // que permite saber quantos cards NOVOS (intervalo_anterior === 0) já foram estudados hoje, pro
     // limite diário de cards novos (ver contarNovosEstudadosHoje).
     dados.srsRevisoesLog.push({
         cardId: cardAtualRevisao.id,
         data: hojeISO(),
-        dataHora: new Date().toISOString(),
+        dataHora: agora.toISOString(),
         qualidade: qualidade,
         intervalo_anterior: intervaloAnterior,
-        intervalo_novo: novoIntervalo,
-        fator_facilidade_anterior: fatorAnterior,
-        fator_facilidade_novo: cardAtualRevisao.fator_facilidade
+        intervalo_novo: resultado.scheduledDays,
+        fsrs_estabilidade_anterior: estabilidadeAnterior,
+        fsrs_estabilidade_novo: resultado.stability,
+        fsrs_dificuldade_anterior: dificuldadeAnterior,
+        fsrs_dificuldade_novo: resultado.difficulty
     });
 
     // NOVO: salvar() dispara atualizar(), que reconstrói o app INTEIRO (checklist, biblioteca,
@@ -7687,6 +7728,11 @@ function inicializarAppComSrsItems() {
     atualizar();
     inicializarCalendario();
 
+    // NOVO: dispara a construção do scheduler do FSRS já aqui (ver garantirSchedulerFSRS) — é
+    // assíncrono, mas como idempotente/com cache, quando o usuário realmente chegar na tela de
+    // revisão (bem depois de tudo acima rodar) ele já está pronto na enorme maioria das vezes.
+    garantirSchedulerFSRS();
+
     // NOVO: resetDiario()/verificarGameOver() são adiados até essa checagem resolver — nunca atrasam o
     // que já rodou acima (tema, calendário, timer, a 1ª atualizar()), só o cálculo de dano/game over em
     // si. Ver aguardarChecagemInicialDoDrive pro motivo (evitar sobrescrever em silêncio o progresso de
@@ -7737,6 +7783,14 @@ window.onload = function() {
         else if (!Array.isArray(dados.srsItems)) dados.srsItems = [];
         dados.srsItems.forEach(i => { if (i.resposta === undefined) i.resposta = ""; }); // compatibilidade com cards antigos
         dados.srsItems.forEach(i => { if (!i.tipo) i.tipo = "normal"; }); // compatibilidade com cards antigos (antes do modo Cloze)
+        // NOVO: migração do SM-2 pro FSRS-6 (ver CLAUDE.md) — sem heurística de conversão: um card que
+        // só tinha fator_facilidade (SM-2) passa a ter estabilidade/dificuldade zeradas, como se fosse a
+        // primeira revisão dele no FSRS (intervalo_atual/data_proxima_revisao são preservados como
+        // estavam até a próxima revisão real recalculá-los).
+        dados.srsItems.forEach(i => {
+            if (i.fsrsEstabilidade === undefined) { i.fsrsEstabilidade = 0; i.fsrsDificuldade = 0; i.fsrsUltimaRevisao = null; }
+            delete i.fator_facilidade;
+        });
         srsItemsAlterado = true; // garante que a 1ª salvar() da sessão já persiste no IndexedDB
         inicializarAppComSrsItems();
     }).catch(err => {
