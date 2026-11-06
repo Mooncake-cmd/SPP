@@ -4854,7 +4854,29 @@ function sanitizarHtmlCapituloMobi(htmlBruto) {
     return doc.body.innerHTML;
 }
 
-// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ, CBR e/ou MOBI/AZW/AZW3 de uma vez) ---
+// === SUPORTE A .TXT NA BIBLIOTECA ===
+// Texto puro não precisa de nenhuma biblioteca externa — só decodificar os bytes e exibir. Pagina por
+// contagem de caracteres (igual o CBZ pagina por imagem), quebrando no fim de uma linha em vez de no
+// meio de uma palavra, pra não ficar cortado de jeito estranho.
+const TXT_TAMANHO_PAGINA = 4000; // ~o tamanho de uma página de livro em caracteres
+function dividirTextoEmPaginas(texto, tamanhoAlvo) {
+    if (!texto) return [""];
+    const linhas = texto.split("\n");
+    const paginas = [];
+    let atual = "";
+    linhas.forEach(linha => {
+        if (atual.length > 0 && atual.length + linha.length + 1 > tamanhoAlvo) {
+            paginas.push(atual);
+            atual = linha;
+        } else {
+            atual = atual.length > 0 ? atual + "\n" + linha : linha;
+        }
+    });
+    if (atual.length > 0) paginas.push(atual);
+    return paginas.length > 0 ? paginas : [""];
+}
+
+// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ, CBR, MOBI/AZW/AZW3 e/ou TXT de uma vez) ---
 function handleUploadLivros(event) {
     const arquivos = Array.from(event.target.files || []);
     if (arquivos.length === 0) return;
@@ -4878,12 +4900,13 @@ function handleUploadLivros(event) {
         const nomeMin = arquivo.name.toLowerCase();
         const ehCbr = nomeMin.endsWith(".cbr");
         const ehMobi = nomeMin.endsWith(".mobi") || nomeMin.endsWith(".azw3") || nomeMin.endsWith(".azw");
-        const tipo = nomeMin.endsWith(".epub") ? "epub" : (ehMobi ? "mobi" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf"));
+        const ehTxt = nomeMin.endsWith(".txt");
+        const tipo = nomeMin.endsWith(".epub") ? "epub" : (ehMobi ? "mobi" : (ehTxt ? "txt" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf")));
         const reader = new FileReader();
         reader.onload = function(e) {
             let arrayBuffer = e.target.result; // reatribuído pro ZIP convertido quando ehCbr (ver abaixo)
             const id = Date.now() + "_" + idx + "_" + Math.floor(Math.random() * 100000);
-            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr|mobi|azw3|azw)$/i, "");
+            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr|mobi|azw3|azw|txt)$/i, "");
 
             const finalizarAdicao = (dadosLivro) => {
                 salvarArquivoLivro(id, arrayBuffer).then(() => {
@@ -4968,6 +4991,15 @@ function handleUploadLivros(event) {
                     statusEl.innerText = (err && err.message === "TIMEOUT")
                         ? `"${arquivo.name}" demorou demais pra processar — pulado.`
                         : `Não foi possível processar "${arquivo.name}" (formato não suportado ou corrompido).`;
+                });
+            } else if (tipo === "txt") {
+                const texto = new TextDecoder("utf-8").decode(arrayBuffer);
+                const paginas = dividirTextoEmPaginas(texto, TXT_TAMANHO_PAGINA);
+                finalizarAdicao({
+                    id: id, tipo: "txt", titulo: titulo,
+                    paginaAtual: 1, totalPaginas: paginas.length,
+                    capaDataUrl: null,
+                    concluido: false, dataUpload: hoje(), dataConclusao: null
                 });
             } else {
                 const bookTemp = ePub(arrayBuffer.slice(0));
@@ -5099,7 +5131,7 @@ function renderizarBiblioteca() {
     const emAndamento = dados.biblioteca.filter(l => !l.concluido);
     const concluidos = dados.biblioteca.filter(l => l.concluido);
 
-    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR ou MOBI acima para começar.");
+    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR, MOBI ou TXT acima para começar.");
     estanteEl.innerHTML = montarSecaoComPrateleiras(concluidos, true, "Nenhum livro concluído ainda.");
 }
 
@@ -5189,8 +5221,8 @@ function removerLivroDaPrateleira() {
 
 function montarCardLivro(livro, concluido) {
     const tipo = livro.tipo || "pdf";
-    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : (tipo === "mobi" ? "📘" : "📖"));
-    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : (tipo === "mobi" ? "MOBI" : "PDF"));
+    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : (tipo === "mobi" ? "📘" : (tipo === "txt" ? "📄" : "📖")));
+    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : (tipo === "mobi" ? "MOBI" : (tipo === "txt" ? "TXT" : "PDF")));
     const capaHtml = livro.capaDataUrl ? `<img src="${livro.capaDataUrl}" alt="Capa de ${escaparHtml(livro.titulo)}">` : (concluido ? "📚" : iconeCapa);
     const tituloSeguro = escaparHtml(livro.titulo);
     const btnPrateleira = `<button class="btn-prateleira-livro" onclick="abrirSeletorPrateleira('${livro.id}')" title="${livro.prateleira ? "Prateleira: " + escaparHtml(livro.prateleira) : "Mover para prateleira"}">📁</button>`;
@@ -5213,12 +5245,13 @@ function montarCardLivro(livro, concluido) {
 }
 
 // --- Leitor (PDF via canvas + camada de texto, EPUB via epub.js, MOBI/AZW3 via mobi-parser.js) ---
-let leitorTipoAtual = null; // 'pdf', 'epub', 'cbz' ou 'mobi'
+let leitorTipoAtual = null; // 'pdf', 'epub', 'cbz', 'mobi' ou 'txt'
 let leitorPdfAtual = null;
 let leitorEpubBook = null;
 let leitorEpubRendition = null;
 let leitorCbzPaginas = []; // URLs de imagem (blob:) das páginas do CBZ aberto, em ordem
 let leitorMobiLivro = null; // instância Mobi/Kf8 (mobi-parser.js) do MOBI/AZW3 aberto
+let leitorTxtPaginas = []; // texto do TXT aberto já dividido em páginas (ver dividirTextoEmPaginas)
 let leitorLivroAtualId = null;
 let leitorPaginaAtual = 1;
 let leitorRenderizando = false;
@@ -5233,6 +5266,7 @@ function abrirLeitor(id) {
     if (tipo === "epub") abrirLeitorEpub(livro);
     else if (tipo === "cbz") abrirLeitorCbz(livro);
     else if (tipo === "mobi") abrirLeitorMobi(livro);
+    else if (tipo === "txt") abrirLeitorTxt(livro);
     else abrirLeitorPdf(livro);
 }
 
@@ -5249,6 +5283,8 @@ function abrirLeitorPdf(livro) {
             document.getElementById("pdf-page-wrapper").classList.remove("oculto");
             document.getElementById("epub-viewer").classList.add("oculto");
             document.getElementById("cbz-viewer").classList.add("oculto");
+            document.getElementById("mobi-viewer").classList.add("oculto");
+            document.getElementById("txt-viewer").classList.add("oculto");
             document.getElementById("leitor-pdf").classList.remove("oculto");
             document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
             renderizarAnotacoesLivro(livro);
@@ -5303,6 +5339,8 @@ function abrirLeitorCbz(livro) {
                     document.getElementById("pdf-page-wrapper").classList.add("oculto");
                     document.getElementById("epub-viewer").classList.add("oculto");
                     document.getElementById("cbz-viewer").classList.remove("oculto");
+                    document.getElementById("mobi-viewer").classList.add("oculto");
+                    document.getElementById("txt-viewer").classList.add("oculto");
                     document.getElementById("leitor-pdf").classList.remove("oculto");
                     document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
                     renderizarAnotacoesLivro(livro);
@@ -5333,6 +5371,7 @@ function abrirLeitorMobi(livro) {
             document.getElementById("epub-viewer").classList.add("oculto");
             document.getElementById("cbz-viewer").classList.add("oculto");
             document.getElementById("mobi-viewer").classList.remove("oculto");
+            document.getElementById("txt-viewer").classList.add("oculto");
             document.getElementById("leitor-pdf").classList.remove("oculto");
             document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
             renderizarAnotacoesLivro(livro);
@@ -5377,6 +5416,44 @@ function renderizarPaginaCBZ(numPagina) {
     };
     img.onerror = () => { leitorRenderizando = false; };
     img.src = leitorCbzPaginas[numPagina - 1];
+}
+
+// NOVO: abre um TXT — texto puro, sem biblioteca externa nenhuma (ver dividirTextoEmPaginas).
+function abrirLeitorTxt(livro) {
+    carregarArquivoLivro(livro.id).then(arrayBuffer => {
+        if (!arrayBuffer) { alert("Arquivo não encontrado. Ele pode ter sido removido."); return; }
+        const texto = new TextDecoder("utf-8").decode(arrayBuffer);
+        leitorTxtPaginas = dividirTextoEmPaginas(texto, TXT_TAMANHO_PAGINA);
+        leitorTipoAtual = "txt";
+        leitorLivroAtualId = livro.id;
+        leitorPaginaAtual = Math.min(livro.paginaAtual || 1, leitorTxtPaginas.length);
+
+        document.getElementById("leitor-titulo-livro").innerText = livro.titulo;
+        document.getElementById("pdf-page-wrapper").classList.add("oculto");
+        document.getElementById("epub-viewer").classList.add("oculto");
+        document.getElementById("cbz-viewer").classList.add("oculto");
+        document.getElementById("mobi-viewer").classList.add("oculto");
+        document.getElementById("txt-viewer").classList.remove("oculto");
+        document.getElementById("leitor-pdf").classList.remove("oculto");
+        document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
+        renderizarAnotacoesLivro(livro);
+        configurarUiLeitorPorTipo("txt");
+
+        renderizarPaginaTxt(leitorPaginaAtual);
+    });
+}
+
+function renderizarPaginaTxt(numPagina) {
+    if (!leitorTxtPaginas.length) return;
+    const alvo = Math.max(1, Math.min(numPagina, leitorTxtPaginas.length));
+    // textContent, não innerHTML: texto de .txt nunca deve ser interpretado como HTML, então nem
+    // precisa passar por sanitização — já é seguro por construção.
+    document.getElementById("txt-viewer").textContent = leitorTxtPaginas[alvo - 1];
+
+    leitorPaginaAtual = alvo;
+    document.getElementById("leitor-pagina-info").innerText = `Pág. ${alvo} / ${leitorTxtPaginas.length}`;
+    atualizarBotoesNavegacaoLeitor();
+    salvarProgressoLeituraAtual();
 }
 
 // ============================================================
@@ -5523,6 +5600,8 @@ function abrirLeitorEpub(livro) {
         document.getElementById("leitor-titulo-livro").innerText = livro.titulo;
         document.getElementById("pdf-page-wrapper").classList.add("oculto");
         document.getElementById("cbz-viewer").classList.add("oculto");
+        document.getElementById("mobi-viewer").classList.add("oculto");
+        document.getElementById("txt-viewer").classList.add("oculto");
         const viewerEl = document.getElementById("epub-viewer");
         viewerEl.innerHTML = "";
         viewerEl.classList.remove("oculto");
@@ -5686,9 +5765,9 @@ function destacarTermoNaPaginaPDF(termo) {
 // (ir-para-página não existe no EPUB; busca de texto não existe no CBZ).
 function configurarUiLeitorPorTipo(tipo) {
     document.getElementById("form-ir-pagina").classList.toggle("oculto", tipo === "epub");
-    // NOVO: MOBI tem texto de verdade (diferente do CBZ, que é imagem), mas busca entre capítulos
-    // carregados sob demanda fica pra uma próxima vez — por ora some igual o CBZ.
-    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz" || tipo === "mobi");
+    // NOVO: MOBI/TXT têm texto de verdade (diferente do CBZ, que é imagem), mas busca neles
+    // fica pra uma próxima vez — por ora some igual o CBZ.
+    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz" || tipo === "mobi" || tipo === "txt");
     document.getElementById("btn-finalizar-leitura").classList.add("oculto");
     resetBuscaLivro();
 }
@@ -5788,6 +5867,7 @@ function obterTotalPaginasAtual() {
     if (leitorTipoAtual === "pdf") return leitorPdfAtual ? leitorPdfAtual.numPages : 1;
     if (leitorTipoAtual === "cbz") return leitorCbzPaginas.length;
     if (leitorTipoAtual === "mobi") return leitorMobiLivro ? leitorMobiLivro.getSpine().length : 1;
+    if (leitorTipoAtual === "txt") return leitorTxtPaginas.length || 1;
     return 1;
 }
 
@@ -5842,6 +5922,7 @@ function proximaPagina() {
     if (leitorTipoAtual === "epub") { if (leitorEpubRendition) leitorEpubRendition.next(); }
     else if (leitorTipoAtual === "cbz") { if (leitorPaginaAtual < leitorCbzPaginas.length) renderizarPaginaCBZ(leitorPaginaAtual + 1); }
     else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual < obterTotalPaginasAtual()) renderizarCapituloMobi(leitorPaginaAtual + 1); }
+    else if (leitorTipoAtual === "txt") { if (leitorPaginaAtual < leitorTxtPaginas.length) renderizarPaginaTxt(leitorPaginaAtual + 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual < leitorPdfAtual.numPages) renderizarPaginaPDF(leitorPaginaAtual + 1); }
 }
 function paginaAnterior() {
@@ -5849,25 +5930,27 @@ function paginaAnterior() {
     if (leitorTipoAtual === "epub") { if (leitorEpubRendition) leitorEpubRendition.prev(); }
     else if (leitorTipoAtual === "cbz") { if (leitorPaginaAtual > 1) renderizarPaginaCBZ(leitorPaginaAtual - 1); }
     else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual > 1) renderizarCapituloMobi(leitorPaginaAtual - 1); }
+    else if (leitorTipoAtual === "txt") { if (leitorPaginaAtual > 1) renderizarPaginaTxt(leitorPaginaAtual - 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual > 1) renderizarPaginaPDF(leitorPaginaAtual - 1); }
 }
 
-// NOVO: vai direto para a página/capítulo digitado (PDF/CBZ/MOBI — EPUB não pagina por número).
+// NOVO: vai direto para a página/capítulo digitado (PDF/CBZ/MOBI/TXT — EPUB não pagina por número).
 function irParaPaginaDigitada() {
     const input = document.getElementById("input-ir-pagina");
     const numero = parseInt(input.value, 10);
-    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi")) return;
+    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt")) return;
     const total = obterTotalPaginasAtual();
     const alvo = Math.max(1, Math.min(numero, total));
     resetScrollLeitor();
     if (leitorTipoAtual === "cbz") renderizarPaginaCBZ(alvo);
     else if (leitorTipoAtual === "mobi") renderizarCapituloMobi(alvo);
+    else if (leitorTipoAtual === "txt") renderizarPaginaTxt(alvo);
     else renderizarPaginaPDF(alvo);
     input.value = "";
 }
 
 function salvarProgressoLeituraAtual() {
-    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi")) return;
+    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt")) return;
     const livro = dados.biblioteca.find(l => l.id === leitorLivroAtualId);
     if (!livro) return;
 
@@ -5896,6 +5979,10 @@ function fecharLeitor() {
     if (leitorMobiLivro) { leitorMobiLivro.destroy(); leitorMobiLivro = null; }
     const mobiViewerEl = document.getElementById("mobi-viewer");
     if (mobiViewerEl) mobiViewerEl.innerHTML = "";
+
+    leitorTxtPaginas = [];
+    const txtViewerEl = document.getElementById("txt-viewer");
+    if (txtViewerEl) txtViewerEl.textContent = "";
 
     resetBuscaLivro();
 

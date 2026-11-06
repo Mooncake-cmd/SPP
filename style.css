@@ -720,6 +720,22 @@ button:hover { filter: brightness(0.9); }
 }
 #mobi-viewer img { max-width: 100%; height: auto; }
 
+/* NOVO: página de TXT (ver renderizarPaginaTxt) — texto puro via textContent, então white-space:pre-wrap
+   é quem faz as quebras de linha do arquivo aparecerem (textContent não interpreta "\n" como <br>). */
+#txt-viewer {
+    width: 100%;
+    max-height: 600px;
+    overflow-y: auto;
+    background: var(--card-bg);
+    color: var(--text-color);
+    text-align: left;
+    padding: 20px;
+    box-sizing: border-box;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    font-family: inherit;
+}
+
 .leitor-controles {
     display: flex;
     align-items: center;
