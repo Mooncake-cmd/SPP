@@ -4930,6 +4930,55 @@ function converterDocxEmPaginas(arrayBuffer) {
     );
 }
 
+// === SUPORTE A .DJVU NA BIBLIOTECA ===
+// djvu-rs (MIT, github.com/matyushkin/djvu-rs — ver djvu-rs/LICENSE) decodifica o formato DJVU inteiro
+// (camada JB2 de primeiro plano composta sobre o fundo IW44, igual o DjVuLibre faria) e devolve pixels
+// RGBA prontos pra um <canvas>. Escrito do zero em Rust a partir da especificação pública do formato
+// (não é baseado no código do DjVuLibre, que é GPL) — testado de ponta a ponta contra 5 arquivos .djvu
+// reais, incluindo um de conteúdo misto foto+texto, pra confirmar que a composição das duas camadas sai
+// certa. Vendorizado (em vez de carregado via CDN) só pra não depender de jsdelivr/unpkg
+// preservarem a estrutura de pastas scalar/simd128/ corretamente — a lib já é ES module puro sem import
+// nenhum pra resolver, então não precisou de nenhum passo de bundling (diferente do mobi-parser.js).
+// Carregada sob demanda (só no primeiro .djvu enviado).
+let promiseDjvuRs = null;
+function carregarBibliotecaDjvu() {
+    if (!promiseDjvuRs) {
+        promiseDjvuRs = import("./djvu-rs/djvu_rs.js").then(mod => mod.default().then(() => mod));
+    }
+    return promiseDjvuRs;
+}
+
+const DJVU_DPI_LEITURA = 150; // mesmo valor usado testando contra os arquivos .djvu reais
+const DJVU_DPI_CAPA = 72; // miniatura — DPI baixo já renderiza pequeno, sem precisar reamostrar depois
+
+// Renderiza uma página do documento DJVU já aberto (doc, WasmDocument) pro ImageData — usado tanto pra
+// exibir no leitor quanto pra gerar a capa (com um DPI mais baixo). WasmPage é uma classe wasm-bindgen
+// (tem free(), não é limpa pelo GC normal do JS — ver djvu-rs/scalar/djvu_rs.d.ts); libera assim que
+// os pixels já foram copiados pro Uint8ClampedArray de render() (cópia independente, não view), então
+// não precisa manter a página viva mais que isso.
+function renderizarPaginaDjvuParaImageData(doc, indicePagina, dpi) {
+    const pagina = doc.page(indicePagina);
+    try {
+        const pixels = pagina.render(dpi);
+        return new ImageData(pixels, pagina.width_at(dpi), pagina.height_at(dpi));
+    } finally {
+        pagina.free();
+    }
+}
+
+function gerarCapaDjvu(doc) {
+    try {
+        const imageData = renderizarPaginaDjvuParaImageData(doc, 0, DJVU_DPI_CAPA);
+        const canvasMini = document.createElement("canvas");
+        canvasMini.width = imageData.width;
+        canvasMini.height = imageData.height;
+        canvasMini.getContext("2d").putImageData(imageData, 0, 0);
+        return canvasMini.toDataURL("image/jpeg", 0.7);
+    } catch (e) {
+        return null;
+    }
+}
+
 // === SUPORTE A .TXT NA BIBLIOTECA ===
 // Texto puro não precisa de nenhuma biblioteca externa — só decodificar os bytes e exibir. Pagina por
 // contagem de caracteres (igual o CBZ pagina por imagem), quebrando no fim de uma linha em vez de no
@@ -4952,7 +5001,7 @@ function dividirTextoEmPaginas(texto, tamanhoAlvo) {
     return paginas.length > 0 ? paginas : [""];
 }
 
-// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ, CBR, MOBI/AZW/AZW3, TXT e/ou DOCX de uma vez) ---
+// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ, CBR, MOBI/AZW/AZW3, TXT, DOCX e/ou DJVU de uma vez) ---
 function handleUploadLivros(event) {
     const arquivos = Array.from(event.target.files || []);
     if (arquivos.length === 0) return;
@@ -4991,12 +5040,13 @@ function handleUploadLivros(event) {
         const ehMobi = nomeMin.endsWith(".mobi") || nomeMin.endsWith(".azw3") || nomeMin.endsWith(".azw");
         const ehTxt = nomeMin.endsWith(".txt");
         const ehDocx = nomeMin.endsWith(".docx");
-        const tipo = nomeMin.endsWith(".epub") ? "epub" : (ehMobi ? "mobi" : (ehTxt ? "txt" : (ehDocx ? "docx" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf"))));
+        const ehDjvu = nomeMin.endsWith(".djvu") || nomeMin.endsWith(".djv");
+        const tipo = nomeMin.endsWith(".epub") ? "epub" : (ehMobi ? "mobi" : (ehTxt ? "txt" : (ehDocx ? "docx" : (ehDjvu ? "djvu" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf")))));
         const reader = new FileReader();
         reader.onload = function(e) {
             let arrayBuffer = e.target.result; // reatribuído pro ZIP convertido quando ehCbr (ver abaixo)
             const id = Date.now() + "_" + idx + "_" + Math.floor(Math.random() * 100000);
-            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr|mobi|azw3|azw|txt|docx)$/i, "");
+            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr|mobi|azw3|azw|txt|docx|djvu|djv)$/i, "");
 
             const finalizarAdicao = (dadosLivro) => {
                 salvarArquivoLivro(id, arrayBuffer).then(() => {
@@ -5103,6 +5153,30 @@ function handleUploadLivros(event) {
                     console.error("Erro ao ler DOCX:", err);
                     processados++;
                     statusEl.innerText = `Não foi possível processar "${arquivo.name}" (DOCX inválido ou corrompido).`;
+                });
+            } else if (tipo === "djvu") {
+                carregarBibliotecaDjvu().then(mod => {
+                    const doc = mod.WasmDocument.from_bytes(new Uint8Array(arrayBuffer));
+                    try {
+                        const totalPaginas = doc.page_count();
+                        if (totalPaginas === 0) {
+                            processados++;
+                            statusEl.innerText = `"${arquivo.name}" não tem nenhuma página (DJVU inválido).`;
+                            return;
+                        }
+                        finalizarAdicao({
+                            id: id, tipo: "djvu", titulo: titulo,
+                            paginaAtual: 1, totalPaginas: totalPaginas,
+                            capaDataUrl: gerarCapaDjvu(doc),
+                            concluido: false, dataUpload: hoje(), dataConclusao: null
+                        });
+                    } finally {
+                        doc.free();
+                    }
+                }).catch(err => {
+                    console.error("Erro ao ler DJVU:", err);
+                    processados++;
+                    statusEl.innerText = `Não foi possível processar "${arquivo.name}" (DJVU inválido ou corrompido).`;
                 });
             } else {
                 const bookTemp = ePub(arrayBuffer.slice(0));
@@ -5234,7 +5308,7 @@ function renderizarBiblioteca() {
     const emAndamento = dados.biblioteca.filter(l => !l.concluido);
     const concluidos = dados.biblioteca.filter(l => l.concluido);
 
-    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR, MOBI, TXT ou DOCX acima para começar.");
+    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR, MOBI, TXT, DOCX ou DJVU acima para começar.");
     estanteEl.innerHTML = montarSecaoComPrateleiras(concluidos, true, "Nenhum livro concluído ainda.");
 }
 
@@ -5324,8 +5398,8 @@ function removerLivroDaPrateleira() {
 
 function montarCardLivro(livro, concluido) {
     const tipo = livro.tipo || "pdf";
-    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : (tipo === "mobi" ? "📘" : (tipo === "txt" ? "📄" : (tipo === "docx" ? "📄" : "📖"))));
-    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : (tipo === "mobi" ? "MOBI" : (tipo === "txt" ? "TXT" : (tipo === "docx" ? "DOCX" : "PDF"))));
+    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : (tipo === "mobi" ? "📘" : (tipo === "txt" ? "📄" : (tipo === "docx" ? "📄" : (tipo === "djvu" ? "🖼️" : "📖")))));
+    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : (tipo === "mobi" ? "MOBI" : (tipo === "txt" ? "TXT" : (tipo === "docx" ? "DOCX" : (tipo === "djvu" ? "DJVU" : "PDF")))));
     const capaHtml = livro.capaDataUrl ? `<img src="${livro.capaDataUrl}" alt="Capa de ${escaparHtml(livro.titulo)}">` : (concluido ? "📚" : iconeCapa);
     const tituloSeguro = escaparHtml(livro.titulo);
     const btnPrateleira = `<button class="btn-prateleira-livro" onclick="abrirSeletorPrateleira('${livro.id}')" title="${livro.prateleira ? "Prateleira: " + escaparHtml(livro.prateleira) : "Mover para prateleira"}">📁</button>`;
@@ -5348,7 +5422,7 @@ function montarCardLivro(livro, concluido) {
 }
 
 // --- Leitor (PDF via canvas + camada de texto, EPUB via epub.js, MOBI/AZW3 via mobi-parser.js) ---
-let leitorTipoAtual = null; // 'pdf', 'epub', 'cbz', 'mobi', 'txt' ou 'docx'
+let leitorTipoAtual = null; // 'pdf', 'epub', 'cbz', 'mobi', 'txt', 'docx' ou 'djvu'
 let leitorPdfAtual = null;
 let leitorEpubBook = null;
 let leitorEpubRendition = null;
@@ -5356,6 +5430,7 @@ let leitorCbzPaginas = []; // URLs de imagem (blob:) das páginas do CBZ aberto,
 let leitorMobiLivro = null; // instância Mobi/Kf8 (mobi-parser.js) do MOBI/AZW3 aberto
 let leitorTxtPaginas = []; // texto do TXT aberto já dividido em páginas (ver dividirTextoEmPaginas)
 let leitorDocxPaginas = []; // HTML (já sanitizado) do DOCX aberto, já dividido em páginas (ver dividirHtmlEmPaginas)
+let leitorDjvuDocumento = null; // WasmDocument (djvu-rs) do DJVU aberto — classe wasm-bindgen, precisa de free()
 let leitorLivroAtualId = null;
 let leitorPaginaAtual = 1;
 let leitorRenderizando = false;
@@ -5372,6 +5447,7 @@ function abrirLeitor(id) {
     else if (tipo === "mobi") abrirLeitorMobi(livro);
     else if (tipo === "txt") abrirLeitorTxt(livro);
     else if (tipo === "docx") abrirLeitorDocx(livro);
+    else if (tipo === "djvu") abrirLeitorDjvu(livro);
     else abrirLeitorPdf(livro);
 }
 
@@ -5391,6 +5467,7 @@ function abrirLeitorPdf(livro) {
             document.getElementById("mobi-viewer").classList.add("oculto");
             document.getElementById("txt-viewer").classList.add("oculto");
             document.getElementById("docx-viewer").classList.add("oculto");
+            document.getElementById("djvu-viewer").classList.add("oculto");
             document.getElementById("leitor-pdf").classList.remove("oculto");
             document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
             renderizarAnotacoesLivro(livro);
@@ -5448,6 +5525,7 @@ function abrirLeitorCbz(livro) {
                     document.getElementById("mobi-viewer").classList.add("oculto");
                     document.getElementById("txt-viewer").classList.add("oculto");
                     document.getElementById("docx-viewer").classList.add("oculto");
+                    document.getElementById("djvu-viewer").classList.add("oculto");
                     document.getElementById("leitor-pdf").classList.remove("oculto");
                     document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
                     renderizarAnotacoesLivro(livro);
@@ -5480,6 +5558,7 @@ function abrirLeitorMobi(livro) {
             document.getElementById("mobi-viewer").classList.remove("oculto");
             document.getElementById("txt-viewer").classList.add("oculto");
             document.getElementById("docx-viewer").classList.add("oculto");
+            document.getElementById("djvu-viewer").classList.add("oculto");
             document.getElementById("leitor-pdf").classList.remove("oculto");
             document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
             renderizarAnotacoesLivro(livro);
@@ -5543,6 +5622,7 @@ function abrirLeitorTxt(livro) {
         document.getElementById("mobi-viewer").classList.add("oculto");
         document.getElementById("txt-viewer").classList.remove("oculto");
         document.getElementById("docx-viewer").classList.add("oculto");
+        document.getElementById("djvu-viewer").classList.add("oculto");
         document.getElementById("leitor-pdf").classList.remove("oculto");
         document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
         renderizarAnotacoesLivro(livro);
@@ -5584,6 +5664,7 @@ function abrirLeitorDocx(livro) {
             document.getElementById("mobi-viewer").classList.add("oculto");
             document.getElementById("txt-viewer").classList.add("oculto");
             document.getElementById("docx-viewer").classList.remove("oculto");
+            document.getElementById("djvu-viewer").classList.add("oculto");
             document.getElementById("leitor-pdf").classList.remove("oculto");
             document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
             renderizarAnotacoesLivro(livro);
@@ -5605,6 +5686,56 @@ function renderizarPaginaDocx(numPagina) {
 
     leitorPaginaAtual = alvo;
     document.getElementById("leitor-pagina-info").innerText = `Pág. ${alvo} / ${leitorDocxPaginas.length}`;
+    atualizarBotoesNavegacaoLeitor();
+    salvarProgressoLeituraAtual();
+}
+
+// NOVO: abre um DJVU — djvu-rs decodifica página por página sob demanda (ao contrário do DOCX, não
+// precisa converter o documento inteiro de uma vez), então abrir só cria o WasmDocument e renderiza a
+// página atual; renderizarPaginaDjvu é quem faz o trabalho a cada virada de página.
+function abrirLeitorDjvu(livro) {
+    if (leitorDjvuDocumento) { leitorDjvuDocumento.free(); leitorDjvuDocumento = null; } // documento DJVU anterior, se houver (ver fecharLeitor) — WasmDocument precisa de free() explícito, memória do Rust não é limpa pelo GC do JS
+    carregarArquivoLivro(livro.id).then(arrayBuffer => {
+        if (!arrayBuffer) { alert("Arquivo não encontrado. Ele pode ter sido removido."); return; }
+        carregarBibliotecaDjvu().then(mod => {
+            leitorDjvuDocumento = mod.WasmDocument.from_bytes(new Uint8Array(arrayBuffer));
+            leitorTipoAtual = "djvu";
+            leitorLivroAtualId = livro.id;
+            leitorPaginaAtual = Math.min(livro.paginaAtual || 1, leitorDjvuDocumento.page_count());
+
+            document.getElementById("leitor-titulo-livro").innerText = livro.titulo;
+            document.getElementById("pdf-page-wrapper").classList.add("oculto");
+            document.getElementById("epub-viewer").classList.add("oculto");
+            document.getElementById("cbz-viewer").classList.add("oculto");
+            document.getElementById("mobi-viewer").classList.add("oculto");
+            document.getElementById("txt-viewer").classList.add("oculto");
+            document.getElementById("docx-viewer").classList.add("oculto");
+            document.getElementById("djvu-viewer").classList.remove("oculto");
+            document.getElementById("leitor-pdf").classList.remove("oculto");
+            document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
+            renderizarAnotacoesLivro(livro);
+            configurarUiLeitorPorTipo("djvu");
+
+            renderizarPaginaDjvu(leitorPaginaAtual);
+        }).catch(err => {
+            console.error("Erro ao abrir DJVU:", err);
+            alert("Não foi possível abrir este DJVU. Verifique se o arquivo não está corrompido.");
+        });
+    });
+}
+
+function renderizarPaginaDjvu(numPagina) {
+    if (!leitorDjvuDocumento) return;
+    const total = leitorDjvuDocumento.page_count();
+    const alvo = Math.max(1, Math.min(numPagina, total));
+    const imageData = renderizarPaginaDjvuParaImageData(leitorDjvuDocumento, alvo - 1, DJVU_DPI_LEITURA);
+    const canvas = document.getElementById("djvu-canvas");
+    canvas.width = imageData.width;
+    canvas.height = imageData.height;
+    canvas.getContext("2d").putImageData(imageData, 0, 0);
+
+    leitorPaginaAtual = alvo;
+    document.getElementById("leitor-pagina-info").innerText = `Pág. ${alvo} / ${total}`;
     atualizarBotoesNavegacaoLeitor();
     salvarProgressoLeituraAtual();
 }
@@ -5756,6 +5887,7 @@ function abrirLeitorEpub(livro) {
         document.getElementById("mobi-viewer").classList.add("oculto");
         document.getElementById("txt-viewer").classList.add("oculto");
         document.getElementById("docx-viewer").classList.add("oculto");
+        document.getElementById("djvu-viewer").classList.add("oculto");
         const viewerEl = document.getElementById("epub-viewer");
         viewerEl.innerHTML = "";
         viewerEl.classList.remove("oculto");
@@ -5919,9 +6051,10 @@ function destacarTermoNaPaginaPDF(termo) {
 // (ir-para-página não existe no EPUB; busca de texto não existe no CBZ).
 function configurarUiLeitorPorTipo(tipo) {
     document.getElementById("form-ir-pagina").classList.toggle("oculto", tipo === "epub");
-    // NOVO: MOBI/TXT/DOCX têm texto de verdade (diferente do CBZ, que é imagem), mas busca neles
-    // fica pra uma próxima vez — por ora some igual o CBZ.
-    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz" || tipo === "mobi" || tipo === "txt" || tipo === "docx");
+    // NOVO: MOBI/TXT/DOCX têm texto de verdade (diferente do CBZ, que é imagem), e DJVU tem até uma
+    // camada de texto OCR de verdade pra quem tiver (ver WasmPage.text() no djvu-rs) — mas busca em
+    // qualquer um deles fica pra uma próxima vez; por ora some igual o CBZ.
+    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz" || tipo === "mobi" || tipo === "txt" || tipo === "docx" || tipo === "djvu");
     document.getElementById("btn-finalizar-leitura").classList.add("oculto");
     resetBuscaLivro();
 }
@@ -6023,6 +6156,7 @@ function obterTotalPaginasAtual() {
     if (leitorTipoAtual === "mobi") return leitorMobiLivro ? leitorMobiLivro.getSpine().length : 1;
     if (leitorTipoAtual === "txt") return leitorTxtPaginas.length || 1;
     if (leitorTipoAtual === "docx") return leitorDocxPaginas.length || 1;
+    if (leitorTipoAtual === "djvu") return leitorDjvuDocumento ? leitorDjvuDocumento.page_count() : 1;
     return 1;
 }
 
@@ -6079,6 +6213,7 @@ function proximaPagina() {
     else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual < obterTotalPaginasAtual()) renderizarCapituloMobi(leitorPaginaAtual + 1); }
     else if (leitorTipoAtual === "txt") { if (leitorPaginaAtual < leitorTxtPaginas.length) renderizarPaginaTxt(leitorPaginaAtual + 1); }
     else if (leitorTipoAtual === "docx") { if (leitorPaginaAtual < leitorDocxPaginas.length) renderizarPaginaDocx(leitorPaginaAtual + 1); }
+    else if (leitorTipoAtual === "djvu") { if (leitorPaginaAtual < obterTotalPaginasAtual()) renderizarPaginaDjvu(leitorPaginaAtual + 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual < leitorPdfAtual.numPages) renderizarPaginaPDF(leitorPaginaAtual + 1); }
 }
 function paginaAnterior() {
@@ -6088,14 +6223,15 @@ function paginaAnterior() {
     else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual > 1) renderizarCapituloMobi(leitorPaginaAtual - 1); }
     else if (leitorTipoAtual === "txt") { if (leitorPaginaAtual > 1) renderizarPaginaTxt(leitorPaginaAtual - 1); }
     else if (leitorTipoAtual === "docx") { if (leitorPaginaAtual > 1) renderizarPaginaDocx(leitorPaginaAtual - 1); }
+    else if (leitorTipoAtual === "djvu") { if (leitorPaginaAtual > 1) renderizarPaginaDjvu(leitorPaginaAtual - 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual > 1) renderizarPaginaPDF(leitorPaginaAtual - 1); }
 }
 
-// NOVO: vai direto para a página/capítulo digitado (PDF/CBZ/MOBI/TXT/DOCX — EPUB não pagina por número).
+// NOVO: vai direto para a página/capítulo digitado (PDF/CBZ/MOBI/TXT/DOCX/DJVU — EPUB não pagina por número).
 function irParaPaginaDigitada() {
     const input = document.getElementById("input-ir-pagina");
     const numero = parseInt(input.value, 10);
-    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt" && leitorTipoAtual !== "docx")) return;
+    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt" && leitorTipoAtual !== "docx" && leitorTipoAtual !== "djvu")) return;
     const total = obterTotalPaginasAtual();
     const alvo = Math.max(1, Math.min(numero, total));
     resetScrollLeitor();
@@ -6103,12 +6239,13 @@ function irParaPaginaDigitada() {
     else if (leitorTipoAtual === "mobi") renderizarCapituloMobi(alvo);
     else if (leitorTipoAtual === "txt") renderizarPaginaTxt(alvo);
     else if (leitorTipoAtual === "docx") renderizarPaginaDocx(alvo);
+    else if (leitorTipoAtual === "djvu") renderizarPaginaDjvu(alvo);
     else renderizarPaginaPDF(alvo);
     input.value = "";
 }
 
 function salvarProgressoLeituraAtual() {
-    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt" && leitorTipoAtual !== "docx")) return;
+    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt" && leitorTipoAtual !== "docx" && leitorTipoAtual !== "djvu")) return;
     const livro = dados.biblioteca.find(l => l.id === leitorLivroAtualId);
     if (!livro) return;
 
@@ -6145,6 +6282,12 @@ function fecharLeitor() {
     leitorDocxPaginas = [];
     const docxViewerEl = document.getElementById("docx-viewer");
     if (docxViewerEl) docxViewerEl.innerHTML = "";
+
+    // NOVO: WasmDocument é uma classe wasm-bindgen (ver djvu-rs/scalar/djvu_rs.d.ts) — tem memória do
+    // lado do Rust que o GC do JS não sabe liberar sozinho; free() é obrigatório, não só boa prática.
+    if (leitorDjvuDocumento) { leitorDjvuDocumento.free(); leitorDjvuDocumento = null; }
+    const djvuCanvas = document.getElementById("djvu-canvas");
+    if (djvuCanvas) { djvuCanvas.width = 0; djvuCanvas.height = 0; }
 
     resetBuscaLivro();
 
