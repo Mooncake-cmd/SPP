@@ -2827,9 +2827,17 @@ function resolverHintsAnki(html, hints) {
 // financeiros do usuário, o sanitizador é allowlist estrita (nunca denylist) e nunca insere o HTML
 // bruto na página: o DOMParser roda numa árvore desconectada, então mesmo um <script> embutido nunca
 // chega a executar.
+// NOVO: H1-H6 adicionados junto com o suporte a DOCX (sanitizarHtmlLivroImportado/mammoth.js, que usa
+// título real pra "Heading 1"/"Heading 2" do Word) — sem título na allowlist, sanitizarNoAnki
+// "desembrulha" a tag (mantém o texto, perde a tag), então todo título de um .docx virava texto comum
+// sem destaque nenhum, igual o resto do parágrafo (confirmado testando com um .docx real). Puramente
+// estrutural, sem atributo nenhum que sobrevive à sanitização (igual DIV/SPAN já permitidos) — mesmo
+// risco zero, só mais fidelidade. Vale também pra campo de Anki com <h1>-<h6> no HTML original (hoje
+// também virava texto sem destaque; agora mostra o título de verdade, igual o Anki mostraria).
 const TAGS_ANKI_PERMITIDAS = new Set([
     "B", "STRONG", "I", "EM", "U", "S", "SUP", "SUB", "SMALL", "BR", "HR", "DIV", "SPAN", "P",
-    "UL", "OL", "LI", "TABLE", "TBODY", "THEAD", "TR", "TD", "TH", "IMG"
+    "UL", "OL", "LI", "TABLE", "TBODY", "THEAD", "TR", "TD", "TH", "IMG",
+    "H1", "H2", "H3", "H4", "H5", "H6"
 ]);
 const PROPRIEDADES_CSS_ANKI_PERMITIDAS = new Set([
     "color", "background-color", "font-weight", "font-style", "text-decoration", "text-align",
@@ -4835,23 +4843,91 @@ function converterCapaMobiParaDataUrl(blobUrl) {
     })).catch(() => null);
 }
 
-// O HTML de cada capítulo vem direto do arquivo do usuário — passa pela MESMA sanitização allowlist já
-// usada nos campos importados de .apkg (ver sanitizarNoAnki/CLAUDE.md), nunca confiando no conteúdo de
-// um arquivo de fora. Remove <style>/<link> igual lá (então o capítulo aparece sem a formatação/CSS
-// original do livro, só o texto) — mesma troca segurança-por-estilo já aceita nesse ponto do app.
-function sanitizarHtmlCapituloMobi(htmlBruto) {
+// O HTML de cada capítulo/página vem direto do arquivo do usuário (MOBI via mobi-parser.js, DOCX via
+// mammoth.js) — passa pela MESMA sanitização allowlist já usada nos campos importados de .apkg (ver
+// sanitizarNoAnki/CLAUDE.md), nunca confiando no conteúdo de um arquivo de fora. Remove <style>/<link>
+// igual lá (então aparece sem a formatação/CSS original do documento, só o texto/estrutura) — mesma
+// troca segurança-por-estilo já aceita nesse ponto do app.
+function sanitizarHtmlLivroImportado(htmlBruto) {
     const doc = new DOMParser().parseFromString(htmlBruto, "text/html");
     sanitizarNoAnki(doc.body);
     // NOVO: sanitizarNoAnki guarda o src de toda <img> em data-srs-img-src-original em vez de manter em
     // "src" — pensado pro pipeline do Anki, onde esse valor é só um NOME DE ARQUIVO dentro do .apkg que
     // precisa ser resolvido depois contra a mídia já importada (ver extrairCampoAnkiComoHtml). Aqui o
-    // valor já É uma blob: de verdade, criada pela própria mobi-parser.js — sem resolução nenhuma pra
-    // fazer, só devolver pro "src" direto (sem isso, toda imagem do capítulo ficava invisível).
+    // valor já É uma URL de verdade (blob: do mobi-parser.js, data: do mammoth.js) — sem resolução
+    // nenhuma pra fazer, só devolver pro "src" direto (sem isso, toda imagem ficava invisível).
     doc.body.querySelectorAll("img[data-srs-img-src-original]").forEach(img => {
         img.setAttribute("src", img.getAttribute("data-srs-img-src-original"));
         img.removeAttribute("data-srs-img-src-original");
     });
     return doc.body.innerHTML;
+}
+
+// === SUPORTE A .DOCX NA BIBLIOTECA ===
+// mammoth.js (BSD-2-Clause, github.com/mwilliamson/mammoth.js) converte o .docx pro HTML mais fiel
+// possível ao original — títulos, negrito/itálico, listas, tabelas, com imagens já embutidas como
+// "data:" URI (sem precisar resolver nada depois). Ao contrário do libarchive.js/mobi-parser.js, o
+// build "pronto pro navegador" publicado (mammoth.browser.min.js) já é autocontido — testado de ponta
+// a ponta contra um .docx real (títulos/negrito/itálico/lista/tabela/imagem embutida), zero import sem
+// resolver — então carrega direto do CDN com uma <script> comum, sem precisar vendorizar nada. Mesmo
+// assim fica sob demanda (só no primeiro .docx enviado), igual libarchive.js/mobi-parser.js — mas como
+// é um script clássico (não módulo ES), o jeito de carregar sob demanda é injetar a <script> na hora,
+// não import().
+let promiseMammoth = null;
+function carregarBibliotecaMammoth() {
+    if (!promiseMammoth) {
+        promiseMammoth = new Promise((resolve, reject) => {
+            const script = document.createElement("script");
+            script.src = "https://cdn.jsdelivr.net/npm/mammoth@1.13.0/mammoth.browser.min.js";
+            script.onload = () => resolve(window.mammoth);
+            script.onerror = () => reject(new Error("Não foi possível carregar a biblioteca de leitura de DOCX."));
+            document.head.appendChild(script);
+        });
+    }
+    return promiseMammoth;
+}
+
+const DOCX_TAMANHO_PAGINA = 4000; // mesmo valor usado pro TXT (ver TXT_TAMANHO_PAGINA, mais abaixo)
+
+// NOVO: diferente de dividirTextoEmPaginas (texto puro, corta linha a linha), aqui é HTML de verdade —
+// cortar por contagem de caracteres no meio do innerHTML partiria uma tag pela metade. Em vez disso,
+// agrupa ELEMENTOS INTEIROS de nível superior do <body> em páginas de ~tamanhoAlvo caracteres VISÍVEIS
+// (textContent, não innerHTML), nunca cortando dentro de um elemento — uma tabela grande sozinha, por
+// exemplo, ainda assim fica inteira numa página só, mesmo passando do alvo.
+function dividirHtmlEmPaginas(htmlBody, tamanhoAlvo) {
+    const doc = new DOMParser().parseFromString(`<body>${htmlBody}</body>`, "text/html");
+    const nos = Array.from(doc.body.childNodes);
+    if (nos.length === 0) return [""];
+
+    const paginas = [];
+    let paginaAtual = doc.createElement("div");
+    let tamanhoAtual = 0;
+
+    nos.forEach(no => {
+        const tamanhoNo = (no.textContent || "").length;
+        if (tamanhoAtual > 0 && tamanhoAtual + tamanhoNo > tamanhoAlvo) {
+            paginas.push(paginaAtual.innerHTML);
+            paginaAtual = doc.createElement("div");
+            tamanhoAtual = 0;
+        }
+        paginaAtual.appendChild(no); // appendChild MOVE o nó (tira de doc.body, põe aqui) — por isso o Array.from acima, pra não iterar uma lista que muda debaixo do pé
+        tamanhoAtual += tamanhoNo;
+    });
+    if (paginaAtual.childNodes.length > 0) paginas.push(paginaAtual.innerHTML);
+    return paginas.length > 0 ? paginas : [""];
+}
+
+// Converte + sanitiza + pagina um .docx — chamada tanto no upload (só pra saber quantas páginas vai
+// ter, pro card) quanto na abertura do leitor (pra exibir de fato). Reconverter nas duas vezes é o
+// mesmo padrão já usado pelo MOBI (inicializarLivroMobiKf8 roda de novo a cada abertura, não só uma
+// vez com cache).
+function converterDocxEmPaginas(arrayBuffer) {
+    return carregarBibliotecaMammoth().then(mammoth =>
+        mammoth.convertToHtml({ arrayBuffer: arrayBuffer }).then(resultado => {
+            const htmlSeguro = sanitizarHtmlLivroImportado(resultado.value);
+            return dividirHtmlEmPaginas(htmlSeguro, DOCX_TAMANHO_PAGINA);
+        })
+    );
 }
 
 // === SUPORTE A .TXT NA BIBLIOTECA ===
@@ -4876,7 +4952,7 @@ function dividirTextoEmPaginas(texto, tamanhoAlvo) {
     return paginas.length > 0 ? paginas : [""];
 }
 
-// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ, CBR, MOBI/AZW/AZW3 e/ou TXT de uma vez) ---
+// --- Upload (aceita múltiplos arquivos PDF, EPUB, CBZ, CBR, MOBI/AZW/AZW3, TXT e/ou DOCX de uma vez) ---
 function handleUploadLivros(event) {
     const arquivos = Array.from(event.target.files || []);
     if (arquivos.length === 0) return;
@@ -4898,15 +4974,29 @@ function handleUploadLivros(event) {
         }
 
         const nomeMin = arquivo.name.toLowerCase();
+
+        // NOVO: .doc (binário antigo do Word, pré-2007) não tem nenhuma biblioteca JS madura/confiável
+        // disponível pra ler no navegador (pesquisado e descartado: word-extractor só extrai texto puro
+        // sem nenhuma formatação e está parado há 5+ anos; reamkit é promissor mas tem só ~5 meses de
+        // existência e não foi testado o suficiente ainda) — melhor avisar claramente do que fingir
+        // suporte com um resultado ruim. Note o endsWith(".doc"): NÃO bate com ".docx" (que termina em
+        // "x"), então não interfere no caminho normal do DOCX abaixo.
+        if (nomeMin.endsWith(".doc")) {
+            processados++;
+            statusEl.innerText = `"${arquivo.name}" é um .doc (formato antigo do Word) — não suportado. Salve como .docx e envie de novo.`;
+            return;
+        }
+
         const ehCbr = nomeMin.endsWith(".cbr");
         const ehMobi = nomeMin.endsWith(".mobi") || nomeMin.endsWith(".azw3") || nomeMin.endsWith(".azw");
         const ehTxt = nomeMin.endsWith(".txt");
-        const tipo = nomeMin.endsWith(".epub") ? "epub" : (ehMobi ? "mobi" : (ehTxt ? "txt" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf")));
+        const ehDocx = nomeMin.endsWith(".docx");
+        const tipo = nomeMin.endsWith(".epub") ? "epub" : (ehMobi ? "mobi" : (ehTxt ? "txt" : (ehDocx ? "docx" : ((nomeMin.endsWith(".cbz") || ehCbr) ? "cbz" : "pdf"))));
         const reader = new FileReader();
         reader.onload = function(e) {
             let arrayBuffer = e.target.result; // reatribuído pro ZIP convertido quando ehCbr (ver abaixo)
             const id = Date.now() + "_" + idx + "_" + Math.floor(Math.random() * 100000);
-            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr|mobi|azw3|azw|txt)$/i, "");
+            const titulo = arquivo.name.replace(/\.(pdf|epub|cbz|cbr|mobi|azw3|azw|txt|docx)$/i, "");
 
             const finalizarAdicao = (dadosLivro) => {
                 salvarArquivoLivro(id, arrayBuffer).then(() => {
@@ -5000,6 +5090,19 @@ function handleUploadLivros(event) {
                     paginaAtual: 1, totalPaginas: paginas.length,
                     capaDataUrl: null,
                     concluido: false, dataUpload: hoje(), dataConclusao: null
+                });
+            } else if (tipo === "docx") {
+                converterDocxEmPaginas(arrayBuffer).then(paginas => {
+                    finalizarAdicao({
+                        id: id, tipo: "docx", titulo: titulo,
+                        paginaAtual: 1, totalPaginas: paginas.length,
+                        capaDataUrl: null,
+                        concluido: false, dataUpload: hoje(), dataConclusao: null
+                    });
+                }).catch(err => {
+                    console.error("Erro ao ler DOCX:", err);
+                    processados++;
+                    statusEl.innerText = `Não foi possível processar "${arquivo.name}" (DOCX inválido ou corrompido).`;
                 });
             } else {
                 const bookTemp = ePub(arrayBuffer.slice(0));
@@ -5131,7 +5234,7 @@ function renderizarBiblioteca() {
     const emAndamento = dados.biblioteca.filter(l => !l.concluido);
     const concluidos = dados.biblioteca.filter(l => l.concluido);
 
-    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR, MOBI ou TXT acima para começar.");
+    listaEl.innerHTML = montarSecaoComPrateleiras(emAndamento, false, "Nenhum livro em andamento. Envie um PDF, EPUB, CBZ, CBR, MOBI, TXT ou DOCX acima para começar.");
     estanteEl.innerHTML = montarSecaoComPrateleiras(concluidos, true, "Nenhum livro concluído ainda.");
 }
 
@@ -5221,8 +5324,8 @@ function removerLivroDaPrateleira() {
 
 function montarCardLivro(livro, concluido) {
     const tipo = livro.tipo || "pdf";
-    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : (tipo === "mobi" ? "📘" : (tipo === "txt" ? "📄" : "📖")));
-    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : (tipo === "mobi" ? "MOBI" : (tipo === "txt" ? "TXT" : "PDF")));
+    const iconeCapa = tipo === "epub" ? "📗" : (tipo === "cbz" ? "🖼️" : (tipo === "mobi" ? "📘" : (tipo === "txt" ? "📄" : (tipo === "docx" ? "📄" : "📖"))));
+    const tagTipo = tipo === "epub" ? "EPUB" : (tipo === "cbz" ? "CBZ" : (tipo === "mobi" ? "MOBI" : (tipo === "txt" ? "TXT" : (tipo === "docx" ? "DOCX" : "PDF"))));
     const capaHtml = livro.capaDataUrl ? `<img src="${livro.capaDataUrl}" alt="Capa de ${escaparHtml(livro.titulo)}">` : (concluido ? "📚" : iconeCapa);
     const tituloSeguro = escaparHtml(livro.titulo);
     const btnPrateleira = `<button class="btn-prateleira-livro" onclick="abrirSeletorPrateleira('${livro.id}')" title="${livro.prateleira ? "Prateleira: " + escaparHtml(livro.prateleira) : "Mover para prateleira"}">📁</button>`;
@@ -5245,13 +5348,14 @@ function montarCardLivro(livro, concluido) {
 }
 
 // --- Leitor (PDF via canvas + camada de texto, EPUB via epub.js, MOBI/AZW3 via mobi-parser.js) ---
-let leitorTipoAtual = null; // 'pdf', 'epub', 'cbz', 'mobi' ou 'txt'
+let leitorTipoAtual = null; // 'pdf', 'epub', 'cbz', 'mobi', 'txt' ou 'docx'
 let leitorPdfAtual = null;
 let leitorEpubBook = null;
 let leitorEpubRendition = null;
 let leitorCbzPaginas = []; // URLs de imagem (blob:) das páginas do CBZ aberto, em ordem
 let leitorMobiLivro = null; // instância Mobi/Kf8 (mobi-parser.js) do MOBI/AZW3 aberto
 let leitorTxtPaginas = []; // texto do TXT aberto já dividido em páginas (ver dividirTextoEmPaginas)
+let leitorDocxPaginas = []; // HTML (já sanitizado) do DOCX aberto, já dividido em páginas (ver dividirHtmlEmPaginas)
 let leitorLivroAtualId = null;
 let leitorPaginaAtual = 1;
 let leitorRenderizando = false;
@@ -5267,6 +5371,7 @@ function abrirLeitor(id) {
     else if (tipo === "cbz") abrirLeitorCbz(livro);
     else if (tipo === "mobi") abrirLeitorMobi(livro);
     else if (tipo === "txt") abrirLeitorTxt(livro);
+    else if (tipo === "docx") abrirLeitorDocx(livro);
     else abrirLeitorPdf(livro);
 }
 
@@ -5285,6 +5390,7 @@ function abrirLeitorPdf(livro) {
             document.getElementById("cbz-viewer").classList.add("oculto");
             document.getElementById("mobi-viewer").classList.add("oculto");
             document.getElementById("txt-viewer").classList.add("oculto");
+            document.getElementById("docx-viewer").classList.add("oculto");
             document.getElementById("leitor-pdf").classList.remove("oculto");
             document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
             renderizarAnotacoesLivro(livro);
@@ -5341,6 +5447,7 @@ function abrirLeitorCbz(livro) {
                     document.getElementById("cbz-viewer").classList.remove("oculto");
                     document.getElementById("mobi-viewer").classList.add("oculto");
                     document.getElementById("txt-viewer").classList.add("oculto");
+                    document.getElementById("docx-viewer").classList.add("oculto");
                     document.getElementById("leitor-pdf").classList.remove("oculto");
                     document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
                     renderizarAnotacoesLivro(livro);
@@ -5372,6 +5479,7 @@ function abrirLeitorMobi(livro) {
             document.getElementById("cbz-viewer").classList.add("oculto");
             document.getElementById("mobi-viewer").classList.remove("oculto");
             document.getElementById("txt-viewer").classList.add("oculto");
+            document.getElementById("docx-viewer").classList.add("oculto");
             document.getElementById("leitor-pdf").classList.remove("oculto");
             document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
             renderizarAnotacoesLivro(livro);
@@ -5392,9 +5500,9 @@ function renderizarCapituloMobi(numCapitulo) {
     const resultado = leitorMobiLivro.loadChapter(spine[alvo - 1].id);
     const container = document.getElementById("mobi-viewer");
     // NOVO: sanitiza o HTML do capítulo (vem direto do arquivo do usuário) antes de exibir — ver
-    // sanitizarHtmlCapituloMobi. O CSS original do livro não sobrevive a isso de propósito (mesma troca
-    // já aceita na importação de .apkg): o texto aparece sem a formatação do editor, só o conteúdo.
-    container.innerHTML = resultado ? sanitizarHtmlCapituloMobi(resultado.html) : "<p>Não foi possível carregar este capítulo.</p>";
+    // sanitizarHtmlLivroImportado. O CSS original do livro não sobrevive a isso de propósito (mesma
+    // troca já aceita na importação de .apkg): o texto aparece sem a formatação do editor, só o conteúdo.
+    container.innerHTML = resultado ? sanitizarHtmlLivroImportado(resultado.html) : "<p>Não foi possível carregar este capítulo.</p>";
 
     leitorPaginaAtual = alvo;
     document.getElementById("leitor-pagina-info").innerText = `Cap. ${alvo} / ${spine.length}`;
@@ -5434,6 +5542,7 @@ function abrirLeitorTxt(livro) {
         document.getElementById("cbz-viewer").classList.add("oculto");
         document.getElementById("mobi-viewer").classList.add("oculto");
         document.getElementById("txt-viewer").classList.remove("oculto");
+        document.getElementById("docx-viewer").classList.add("oculto");
         document.getElementById("leitor-pdf").classList.remove("oculto");
         document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
         renderizarAnotacoesLivro(livro);
@@ -5452,6 +5561,50 @@ function renderizarPaginaTxt(numPagina) {
 
     leitorPaginaAtual = alvo;
     document.getElementById("leitor-pagina-info").innerText = `Pág. ${alvo} / ${leitorTxtPaginas.length}`;
+    atualizarBotoesNavegacaoLeitor();
+    salvarProgressoLeituraAtual();
+}
+
+// NOVO: abre um DOCX — mammoth.js converte o documento inteiro pra HTML numa passada só (sem API de
+// "carregar capítulo X" como o MOBI tem), então a conversão+sanitização+paginação inteira
+// (converterDocxEmPaginas) já roda aqui na abertura, não de novo a cada virada de página.
+function abrirLeitorDocx(livro) {
+    carregarArquivoLivro(livro.id).then(arrayBuffer => {
+        if (!arrayBuffer) { alert("Arquivo não encontrado. Ele pode ter sido removido."); return; }
+        converterDocxEmPaginas(arrayBuffer).then(paginas => {
+            leitorDocxPaginas = paginas;
+            leitorTipoAtual = "docx";
+            leitorLivroAtualId = livro.id;
+            leitorPaginaAtual = Math.min(livro.paginaAtual || 1, leitorDocxPaginas.length);
+
+            document.getElementById("leitor-titulo-livro").innerText = livro.titulo;
+            document.getElementById("pdf-page-wrapper").classList.add("oculto");
+            document.getElementById("epub-viewer").classList.add("oculto");
+            document.getElementById("cbz-viewer").classList.add("oculto");
+            document.getElementById("mobi-viewer").classList.add("oculto");
+            document.getElementById("txt-viewer").classList.add("oculto");
+            document.getElementById("docx-viewer").classList.remove("oculto");
+            document.getElementById("leitor-pdf").classList.remove("oculto");
+            document.getElementById("leitor-pdf").scrollIntoView({ behavior: "smooth", block: "start" });
+            renderizarAnotacoesLivro(livro);
+            configurarUiLeitorPorTipo("docx");
+
+            renderizarPaginaDocx(leitorPaginaAtual);
+        }).catch(err => {
+            console.error("Erro ao abrir DOCX:", err);
+            alert("Não foi possível abrir este DOCX. Verifique se o arquivo não está corrompido.");
+        });
+    });
+}
+
+function renderizarPaginaDocx(numPagina) {
+    if (!leitorDocxPaginas.length) return;
+    const alvo = Math.max(1, Math.min(numPagina, leitorDocxPaginas.length));
+    // já vem sanitizado de converterDocxEmPaginas — não precisa sanitizar de novo a cada página.
+    document.getElementById("docx-viewer").innerHTML = leitorDocxPaginas[alvo - 1];
+
+    leitorPaginaAtual = alvo;
+    document.getElementById("leitor-pagina-info").innerText = `Pág. ${alvo} / ${leitorDocxPaginas.length}`;
     atualizarBotoesNavegacaoLeitor();
     salvarProgressoLeituraAtual();
 }
@@ -5602,6 +5755,7 @@ function abrirLeitorEpub(livro) {
         document.getElementById("cbz-viewer").classList.add("oculto");
         document.getElementById("mobi-viewer").classList.add("oculto");
         document.getElementById("txt-viewer").classList.add("oculto");
+        document.getElementById("docx-viewer").classList.add("oculto");
         const viewerEl = document.getElementById("epub-viewer");
         viewerEl.innerHTML = "";
         viewerEl.classList.remove("oculto");
@@ -5765,9 +5919,9 @@ function destacarTermoNaPaginaPDF(termo) {
 // (ir-para-página não existe no EPUB; busca de texto não existe no CBZ).
 function configurarUiLeitorPorTipo(tipo) {
     document.getElementById("form-ir-pagina").classList.toggle("oculto", tipo === "epub");
-    // NOVO: MOBI/TXT têm texto de verdade (diferente do CBZ, que é imagem), mas busca neles
+    // NOVO: MOBI/TXT/DOCX têm texto de verdade (diferente do CBZ, que é imagem), mas busca neles
     // fica pra uma próxima vez — por ora some igual o CBZ.
-    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz" || tipo === "mobi" || tipo === "txt");
+    document.getElementById("btn-busca-livro").classList.toggle("oculto", tipo === "cbz" || tipo === "mobi" || tipo === "txt" || tipo === "docx");
     document.getElementById("btn-finalizar-leitura").classList.add("oculto");
     resetBuscaLivro();
 }
@@ -5868,6 +6022,7 @@ function obterTotalPaginasAtual() {
     if (leitorTipoAtual === "cbz") return leitorCbzPaginas.length;
     if (leitorTipoAtual === "mobi") return leitorMobiLivro ? leitorMobiLivro.getSpine().length : 1;
     if (leitorTipoAtual === "txt") return leitorTxtPaginas.length || 1;
+    if (leitorTipoAtual === "docx") return leitorDocxPaginas.length || 1;
     return 1;
 }
 
@@ -5923,6 +6078,7 @@ function proximaPagina() {
     else if (leitorTipoAtual === "cbz") { if (leitorPaginaAtual < leitorCbzPaginas.length) renderizarPaginaCBZ(leitorPaginaAtual + 1); }
     else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual < obterTotalPaginasAtual()) renderizarCapituloMobi(leitorPaginaAtual + 1); }
     else if (leitorTipoAtual === "txt") { if (leitorPaginaAtual < leitorTxtPaginas.length) renderizarPaginaTxt(leitorPaginaAtual + 1); }
+    else if (leitorTipoAtual === "docx") { if (leitorPaginaAtual < leitorDocxPaginas.length) renderizarPaginaDocx(leitorPaginaAtual + 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual < leitorPdfAtual.numPages) renderizarPaginaPDF(leitorPaginaAtual + 1); }
 }
 function paginaAnterior() {
@@ -5931,26 +6087,28 @@ function paginaAnterior() {
     else if (leitorTipoAtual === "cbz") { if (leitorPaginaAtual > 1) renderizarPaginaCBZ(leitorPaginaAtual - 1); }
     else if (leitorTipoAtual === "mobi") { if (leitorPaginaAtual > 1) renderizarCapituloMobi(leitorPaginaAtual - 1); }
     else if (leitorTipoAtual === "txt") { if (leitorPaginaAtual > 1) renderizarPaginaTxt(leitorPaginaAtual - 1); }
+    else if (leitorTipoAtual === "docx") { if (leitorPaginaAtual > 1) renderizarPaginaDocx(leitorPaginaAtual - 1); }
     else { if (leitorPdfAtual && leitorPaginaAtual > 1) renderizarPaginaPDF(leitorPaginaAtual - 1); }
 }
 
-// NOVO: vai direto para a página/capítulo digitado (PDF/CBZ/MOBI/TXT — EPUB não pagina por número).
+// NOVO: vai direto para a página/capítulo digitado (PDF/CBZ/MOBI/TXT/DOCX — EPUB não pagina por número).
 function irParaPaginaDigitada() {
     const input = document.getElementById("input-ir-pagina");
     const numero = parseInt(input.value, 10);
-    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt")) return;
+    if (!numero || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt" && leitorTipoAtual !== "docx")) return;
     const total = obterTotalPaginasAtual();
     const alvo = Math.max(1, Math.min(numero, total));
     resetScrollLeitor();
     if (leitorTipoAtual === "cbz") renderizarPaginaCBZ(alvo);
     else if (leitorTipoAtual === "mobi") renderizarCapituloMobi(alvo);
     else if (leitorTipoAtual === "txt") renderizarPaginaTxt(alvo);
+    else if (leitorTipoAtual === "docx") renderizarPaginaDocx(alvo);
     else renderizarPaginaPDF(alvo);
     input.value = "";
 }
 
 function salvarProgressoLeituraAtual() {
-    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt")) return;
+    if (!leitorLivroAtualId || (leitorTipoAtual !== "pdf" && leitorTipoAtual !== "cbz" && leitorTipoAtual !== "mobi" && leitorTipoAtual !== "txt" && leitorTipoAtual !== "docx")) return;
     const livro = dados.biblioteca.find(l => l.id === leitorLivroAtualId);
     if (!livro) return;
 
@@ -5983,6 +6141,10 @@ function fecharLeitor() {
     leitorTxtPaginas = [];
     const txtViewerEl = document.getElementById("txt-viewer");
     if (txtViewerEl) txtViewerEl.textContent = "";
+
+    leitorDocxPaginas = [];
+    const docxViewerEl = document.getElementById("docx-viewer");
+    if (docxViewerEl) docxViewerEl.innerHTML = "";
 
     resetBuscaLivro();
 
